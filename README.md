@@ -4,8 +4,8 @@ Suite de escritorio para extraer, transformar, organizar y preparar texturas y s
 
 ## Estado del proyecto
 
-* **Fase actual:** Fase 4 completada (Sprites y atlas: detección automática por transparencia, pivotes/anclas configurables, empaquetador 2D MaxRects BSSF sin solapamientos, exportación atómica PNG + JSON estándar, persistencia en `.ivtex`).
-* **Próxima fase:** Fase 5 (PBR y mapas de normales).
+* **Fase actual:** Fase 5 completada (Preparación de texturas y mosaico: filtros no destructivos de brillo, contraste, saturación, ecualización/aplanado de iluminación, balance RGB; generador de textura seamless con mezcla separable continua; vista interactiva en mosaico NxN; persistencia y exportación dedicada).
+* **Próxima fase:** Fase 6 (Generación de mapas PBR y normales).
 * **Plataforma:** Windows (arquitectura multiplataforma preparada).
 
 ---
@@ -109,6 +109,28 @@ Suite de escritorio para extraer, transformar, organizar y preparar texturas y s
    - Exportación simultánea y atómica de la imagen del atlas (`.png`) y el archivo de metadatos (`.json`).
    - Formato de metadatos JSON compatible con motores de videojuegos (Godot, Unity, PixiJS, Phaser), incluyendo dimensiones, cuadros (`frame`, `spriteSourceSize`, `sourceSize`) y pivotes normalizados.
    - Persistencia completa de regiones de sprites y configuraciones de atlas dentro del contenedor de proyecto `.ivtex`.
+
+### Fase 5: Preparación de texturas, Seamless y Mosaico
+1. **Filtros de color e iluminación en tiempo real (`imaging.color`)**:
+   - Ajuste reactivo de brillo y contraste preservando el canal alfa intacto.
+   - Ajuste de saturación de color en espacio HSV (desde blanco y negro completo hasta saturación aumentada).
+   - Balance de color por canal RGB con factores independientes de ganancia (0.0 a 3.0).
+   - Aplanado y ecualización de iluminación mediante sustracción de frecuencias bajas (filtro gaussiano) para eliminar viñeteados y gradientes de luz indeseados.
+   - Restablecimiento instantáneo a valores por defecto con 1 clic.
+
+2. **Generación de texturas sin costuras / Seamless (`imaging.seamless`)**:
+   - Algoritmo separable en dos pasadas (roll horizontal + mezcla, seguido de roll vertical + mezcla) con curva cosenoidal suave (*smootherstep*).
+   - Garantía matemática de continuidad adyacente exacta en ambos ejes $X$ e $Y$ sin artefactos cruzados en el centro ni esquinas.
+   - Margen de fusión (*blend ratio*) graduable de 2 % a 45 %.
+
+3. **Previsualización interactiva en Mosaico (`TexturePrepTool` y `ImageCanvas`)**:
+   - Vista en cuadrícula repetida ($2\times 2$, $3\times 3$, $4\times 4$ hasta $8\times 8$) en el lienzo principal para verificar la repetición y detectar patrones repetitivos indeseados a cualquier nivel de zoom.
+   - Líneas guía de cuadrícula punteadas en la superposición para visualizar los límites individuales de las baldosas.
+   - Flujo 100 % no destructivo: la imagen de origen permanece inmaculada en memoria; al alternar de modo, el lienzo restaura de inmediato los píxeles originales.
+
+4. **Integración de proyecto y exportación (`core.document`, `exporters.image_exporter`)**:
+   - Nuevo modelo de datos `TexturePrepSettings` integrado transparentemente en proyectos `.ivtex` manteniendo retrocompatibilidad total con proyectos de fases anteriores.
+   - Exportación dedicada de la textura preparada resultante en PNG, JPEG, WebP, BMP y TGA.
 
 ---
 

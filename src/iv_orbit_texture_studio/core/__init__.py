@@ -2,6 +2,7 @@ from iv_orbit_texture_studio.core.document import (
     AtlasSettings,
     Document,
     SourceImageInfo,
+    TexturePrepSettings,
     TextureRipperData,
 )
 from iv_orbit_texture_studio.core.region import (
@@ -19,5 +20,6 @@ __all__ = [
     "Rect",
     "SourceImageInfo",
     "SpriteRegion",
+    "TexturePrepSettings",
     "TextureRipperData",
 ]

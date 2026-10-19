@@ -14,6 +14,7 @@ from PySide6.QtGui import (
     QActionGroup,
     QCloseEvent,
     QGuiApplication,
+    QImage,
     QKeySequence,
     QUndoStack,
 )
@@ -27,7 +28,11 @@ from PySide6.QtWidgets import (
 )
 
 from iv_orbit_texture_studio.core.commands import MoveVertexCommand, SetQuadCommand
-from iv_orbit_texture_studio.core.document import Document, SourceImageInfo
+from iv_orbit_texture_studio.core.document import (
+    Document,
+    SourceImageInfo,
+    TexturePrepSettings,
+)
 from iv_orbit_texture_studio.imaging.image_io import (
     ImageLoadError,
     LoadedImage,
@@ -46,6 +51,7 @@ from iv_orbit_texture_studio.project_io import (
     save_project,
 )
 from iv_orbit_texture_studio.tools.sprites import SpritePanel, SpriteTool
+from iv_orbit_texture_studio.tools.texture_prep import TexturePrepPanel, TexturePrepTool
 from iv_orbit_texture_studio.tools.texture_ripper.preview import TextureRipperPanel
 from iv_orbit_texture_studio.tools.texture_ripper.tool import TextureRipperTool
 from iv_orbit_texture_studio.ui.canvas.image_canvas import ImageCanvas
@@ -63,6 +69,8 @@ class MainWindow(QMainWindow):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._current_image: LoadedImage | None = None
+        self._original_qimage: QImage | None = None
+        self._current_mode: str = "ripper"
         self._last_directory: Path | None = None
         self._document: Document = Document()
         self.undo_stack: QUndoStack = QUndoStack(self)
@@ -100,6 +108,19 @@ class MainWindow(QMainWindow):
         )
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_sprites)
         self.tabifyDockWidget(self.dock_panel, self.dock_sprites)
+
+        # Herramienta Preparación y Mosaico (Seamless)
+        self.prep_tool = TexturePrepTool(self)
+        self.prep_panel = TexturePrepPanel(self.prep_tool, self)
+        self.dock_prep = QDockWidget(self.tr("Preparación y Mosaico"), self)
+        self.dock_prep.setObjectName("dock_texture_prep")
+        self.dock_prep.setWidget(self.prep_panel)
+        self.dock_prep.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_prep)
+        self.tabifyDockWidget(self.dock_sprites, self.dock_prep)
         self.dock_panel.raise_()
 
         self._create_actions()
@@ -141,6 +162,10 @@ class MainWindow(QMainWindow):
         self.action_export_atlas.setShortcut(QKeySequence("Ctrl+Shift+E"))
         self.action_export_atlas.triggered.connect(self.sprite_panel.export_atlas)
 
+        self.action_export_prep = QAction(self.tr("Exportar textura &preparada…"), self)
+        self.action_export_prep.setShortcut(QKeySequence("Ctrl+Alt+E"))
+        self.action_export_prep.triggered.connect(self.prep_panel.export_texture)
+
         self.action_quit = QAction(self.tr("&Salir"), self)
         self.action_quit.setShortcut(QKeySequence.StandardKey.Quit)
         self.action_quit.triggered.connect(self.close)
@@ -160,6 +185,12 @@ class MainWindow(QMainWindow):
         self.action_mode_sprites.setChecked(False)
         self.action_mode_sprites.triggered.connect(lambda: self.set_mode("sprites"))
         self.mode_group.addAction(self.action_mode_sprites)
+
+        self.action_mode_prep = QAction(self.tr("Modo &Preparación y Mosaico"), self)
+        self.action_mode_prep.setCheckable(True)
+        self.action_mode_prep.setChecked(False)
+        self.action_mode_prep.triggered.connect(lambda: self.set_mode("prep"))
+        self.mode_group.addAction(self.action_mode_prep)
 
         # Operaciones de sprites
         self.action_detect_sprites = QAction(self.tr("&Detectar sprites automáticamente"), self)
@@ -225,6 +256,7 @@ class MainWindow(QMainWindow):
         menu_file.addSeparator()
         menu_file.addAction(self.action_export)
         menu_file.addAction(self.action_export_atlas)
+        menu_file.addAction(self.action_export_prep)
         menu_file.addSeparator()
         menu_file.addAction(self.action_quit)
 
@@ -239,6 +271,7 @@ class MainWindow(QMainWindow):
         menu_tools = self.menuBar().addMenu(self.tr("&Herramientas"))
         menu_tools.addAction(self.action_mode_ripper)
         menu_tools.addAction(self.action_mode_sprites)
+        menu_tools.addAction(self.action_mode_prep)
         menu_tools.addSeparator()
         menu_tools.addAction(self.action_detect_sprites)
         menu_tools.addAction(self.action_pack_atlas)
@@ -250,6 +283,7 @@ class MainWindow(QMainWindow):
         menu_window = self.menuBar().addMenu(self.tr("&Ventana"))
         menu_window.addAction(self.dock_panel.toggleViewAction())
         menu_window.addAction(self.dock_sprites.toggleViewAction())
+        menu_window.addAction(self.dock_prep.toggleViewAction())
 
     def _create_toolbar(self) -> None:
         toolbar = self.addToolBar(self.tr("Principal"))
@@ -265,28 +299,58 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(self.action_export)
         toolbar.addAction(self.action_export_atlas)
+        toolbar.addAction(self.action_export_prep)
         toolbar.addSeparator()
         toolbar.addAction(self.action_mode_ripper)
         toolbar.addAction(self.action_mode_sprites)
+        toolbar.addAction(self.action_mode_prep)
         toolbar.addSeparator()
         for action in self._view_actions:
             toolbar.addAction(action)
 
     def set_mode(self, mode: str) -> None:
-        """Cambia el modo activo entre Texture Ripper y Sprites."""
+        """Cambia el modo activo entre Texture Ripper, Sprites y Preparación/Mosaico."""
+        prev_mode = self._current_mode
+        self._current_mode = mode
+
+        # Si salimos de modo prep y teníamos la imagen procesada en el lienzo,
+        # restaurar la imagen original en el lienzo
+        if prev_mode == "prep" and mode != "prep" and self._original_qimage is not None:
+            self.canvas.set_image(self._original_qimage, keep_view=True)
+
         if mode == "ripper":
             self.canvas.set_tool(self.tool)
             self.dock_panel.show()
             self.dock_panel.raise_()
             self.action_mode_ripper.setChecked(True)
             self.action_mode_sprites.setChecked(False)
+            self.action_mode_prep.setChecked(False)
         elif mode == "sprites":
             self.canvas.set_tool(self.sprite_tool)
             self.dock_sprites.show()
             self.dock_sprites.raise_()
             self.action_mode_ripper.setChecked(False)
             self.action_mode_sprites.setChecked(True)
+            self.action_mode_prep.setChecked(False)
+        elif mode == "prep":
+            self.canvas.set_tool(self.prep_tool)
+            self.dock_prep.show()
+            self.dock_prep.raise_()
+            self.action_mode_ripper.setChecked(False)
+            self.action_mode_sprites.setChecked(False)
+            self.action_mode_prep.setChecked(True)
+            self._update_prep_canvas_image()
+
         self._update_actions()
+
+    def _update_prep_canvas_image(self) -> None:
+        if self._current_mode != "prep":
+            return
+        if self.prep_tool.processed_pixels is not None:
+            qimg = rgba_array_to_qimage(self.prep_tool.processed_pixels)
+            self.canvas.set_image(qimg, keep_view=True)
+        elif self._original_qimage is not None:
+            self.canvas.set_image(self._original_qimage, keep_view=True)
 
     def _create_status_bar(self) -> None:
         self._label_file = QLabel()
@@ -314,6 +378,9 @@ class MainWindow(QMainWindow):
         self.ripper_panel.export_requested.connect(self._on_export_finished)
         self.sprite_tool.sprites_changed.connect(self._on_sprites_changed)
         self.sprite_panel.atlas_exported.connect(self._on_atlas_exported)
+        self.prep_tool.texture_updated.connect(self._on_prep_texture_updated)
+        self.prep_panel.prep_modified.connect(self._on_prep_modified)
+        self.prep_panel.texture_exported.connect(self._on_prep_texture_exported)
 
     def _on_export_finished(self, path: Path) -> None:
         self.statusBar().showMessage(
@@ -334,6 +401,22 @@ class MainWindow(QMainWindow):
             6000,
         )
 
+    def _on_prep_texture_updated(self) -> None:
+        if self._current_mode == "prep":
+            self._update_prep_canvas_image()
+        self._update_actions()
+
+    def _on_prep_modified(self) -> None:
+        self._update_actions()
+        if self.canvas.has_image:
+            self._document.touch_modified()
+            self._update_window_title()
+
+    def _on_prep_texture_exported(self, path: Path) -> None:
+        self.statusBar().showMessage(
+            self.tr("Textura exportada en: {name}").format(name=path.name), 6000
+        )
+
     def _update_actions(self) -> None:
         has_image = self.canvas.has_image
         self.action_save_project.setEnabled(has_image)
@@ -346,6 +429,9 @@ class MainWindow(QMainWindow):
         has_sprites = len(self.sprite_tool.sprites) > 0
         self.action_pack_atlas.setEnabled(has_image and has_sprites)
         self.action_export_atlas.setEnabled(has_image and has_sprites)
+        self.action_export_prep.setEnabled(
+            has_image and self.prep_tool.processed_pixels is not None
+        )
         for action in self._view_actions:
             action.setEnabled(has_image)
 
@@ -417,6 +503,7 @@ class MainWindow(QMainWindow):
             return False
 
         self._current_image = None
+        self._original_qimage = None
         self._document = Document()
         self.canvas.clear_image()
         self.tool.selection.clear()
@@ -425,6 +512,8 @@ class MainWindow(QMainWindow):
         self.undo_stack.clear()
         self.ripper_panel.set_source_image(None)
         self.sprite_panel.set_source_image(None)
+        self.prep_panel.set_source_image(None)
+        self.prep_panel.set_settings(TexturePrepSettings())
         self._update_window_title()
         self._update_actions()
         self._refresh_status()
@@ -466,6 +555,7 @@ class MainWindow(QMainWindow):
         QGuiApplication.restoreOverrideCursor()
 
         self._current_image = loaded
+        self._original_qimage = qimage
         self._last_directory = path.parent
         self._document = Document(
             project_name=path.name,
@@ -477,6 +567,10 @@ class MainWindow(QMainWindow):
         self.canvas.set_image(qimage)
         self.ripper_panel.set_source_image(loaded)
         self.sprite_panel.set_source_image(loaded)
+        self.prep_panel.set_source_image(loaded)
+        self.prep_panel.set_settings(TexturePrepSettings())
+        if self._current_mode == "prep":
+            self._update_prep_canvas_image()
         self._update_window_title()
         self._update_actions()
         self._refresh_status()
@@ -530,6 +624,7 @@ class MainWindow(QMainWindow):
 
         self._document = doc
         self._current_image = loaded
+        self._original_qimage = qimage
         self._last_directory = path.parent
         self.undo_stack.clear()
 
@@ -537,6 +632,7 @@ class MainWindow(QMainWindow):
         self.canvas.set_image(qimage)
         self.ripper_panel.set_source_image(loaded)
         self.sprite_panel.set_source_image(loaded)
+        self.prep_panel.set_source_image(loaded)
 
         # Restaurar parámetros de Texture Ripper
         self.ripper_panel.set_dimensions(
@@ -553,6 +649,11 @@ class MainWindow(QMainWindow):
         # Restaurar sprites y atlas
         self.sprite_tool.set_sprites(list(doc.sprites))
         self.sprite_panel.set_atlas_settings(doc.atlas)
+
+        # Restaurar preparación y mosaico
+        self.prep_panel.set_settings(doc.texture_prep)
+        if self._current_mode == "prep":
+            self._update_prep_canvas_image()
 
         self._update_window_title()
         self._update_actions()
@@ -616,6 +717,9 @@ class MainWindow(QMainWindow):
         # Sincronizar sprites y atlas
         self._document.sprites = list(self.sprite_tool.sprites)
         self._document.atlas = self.sprite_panel.get_atlas_settings()
+
+        # Sincronizar preparación y mosaico
+        self._document.texture_prep = self.prep_panel.get_settings()
 
         img_bytes = self._get_current_image_bytes()
 

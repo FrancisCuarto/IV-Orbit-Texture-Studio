@@ -174,3 +174,30 @@ def test_project_with_sprites_and_atlas(tmp_path: Path):
     assert loaded.sprites[1].name == "sprite_2"
     assert loaded.atlas.spacing == 4
     assert loaded.atlas.power_of_two is True
+
+
+def test_project_with_texture_prep_settings(tmp_path):
+    proj_file = tmp_path / "prep_proj.ivtex"
+    img_bytes = _make_dummy_image_bytes()
+
+    doc = Document(project_name="Proyecto con Filtros y Seamless")
+    doc.texture_prep.brightness = 0.25
+    doc.texture_prep.contrast = 0.40
+    doc.texture_prep.saturation = -0.50
+    doc.texture_prep.red_gain = 1.2
+    doc.texture_prep.seamless_enabled = True
+    doc.texture_prep.seamless_blend = 0.30
+    doc.texture_prep.tiling_grid_x = 4
+    doc.texture_prep.tiling_grid_y = 2
+
+    save_project(proj_file, doc, image_bytes=img_bytes)
+
+    loaded, _ = load_project(proj_file)
+    assert loaded.texture_prep.brightness == 0.25
+    assert loaded.texture_prep.contrast == 0.40
+    assert loaded.texture_prep.saturation == -0.50
+    assert loaded.texture_prep.red_gain == 1.2
+    assert loaded.texture_prep.seamless_enabled is True
+    assert loaded.texture_prep.seamless_blend == 0.30
+    assert loaded.texture_prep.tiling_grid_x == 4
+    assert loaded.texture_prep.tiling_grid_y == 2

@@ -103,12 +103,16 @@ class ImageCanvas(QWidget):
                     self._tool.selection_changed.disconnect(self.update)
                 if hasattr(self._tool, "sprites_changed"):
                     self._tool.sprites_changed.disconnect(self.update)
+                if hasattr(self._tool, "texture_updated"):
+                    self._tool.texture_updated.disconnect(self.update)
         self._tool = tool
         if self._tool is not None:
             if hasattr(self._tool, "selection_changed"):
                 self._tool.selection_changed.connect(self.update)
             if hasattr(self._tool, "sprites_changed"):
                 self._tool.sprites_changed.connect(self.update)
+            if hasattr(self._tool, "texture_updated"):
+                self._tool.texture_updated.connect(self.update)
             if self._image_size is not None and hasattr(self._tool, "set_image_size"):
                 self._tool.set_image_size(self._image_size)
         self.update()
@@ -135,14 +139,17 @@ class ImageCanvas(QWidget):
         return QSize(800, 600)
 
     # ---------------------------------------------------------------- imagen
-    def set_image(self, image: QImage) -> None:
+    def set_image(self, image: QImage, keep_view: bool = False) -> None:
         if image.isNull():
             raise ValueError("No se puede mostrar una imagen vacía")
         self._image = image
         self._image_size = Size(float(image.width()), float(image.height()))
         if self._tool is not None:
             self._tool.set_image_size(self._image_size)
-        self.fit_to_view()
+        if not keep_view:
+            self.fit_to_view()
+        else:
+            self.update()
 
     def clear_image(self) -> None:
         self._image = None
@@ -243,6 +250,7 @@ class ImageCanvas(QWidget):
         )
         painter.setTransform(QTransform(zoom, 0.0, 0.0, zoom, offset.x, offset.y))
         painter.drawImage(QPointF(0.0, 0.0), self._image)
+        painter.resetTransform()
 
         # Dibujar superposición de la herramienta activa (vértices, cuadrilátero)
         if self._tool is not None:

@@ -129,6 +129,54 @@ class AtlasSettings:
 
 
 @dataclass
+class TexturePrepSettings:
+    """Configuración para los filtros de color y generación seamless."""
+
+    brightness: float = 0.0  # [-1.0, 1.0]
+    contrast: float = 0.0  # [-1.0, 1.0]
+    saturation: float = 0.0  # [-1.0, 1.0]
+    red_gain: float = 1.0  # [0.0, 3.0]
+    green_gain: float = 1.0  # [0.0, 3.0]
+    blue_gain: float = 1.0  # [0.0, 3.0]
+    equalize_light: float = 0.0  # [0.0, 1.0]
+    seamless_enabled: bool = False
+    seamless_blend: float = 0.20  # [0.02, 0.45]
+    tiling_grid_x: int = 3
+    tiling_grid_y: int = 3
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "brightness": self.brightness,
+            "contrast": self.contrast,
+            "saturation": self.saturation,
+            "red_gain": self.red_gain,
+            "green_gain": self.green_gain,
+            "blue_gain": self.blue_gain,
+            "equalize_light": self.equalize_light,
+            "seamless_enabled": self.seamless_enabled,
+            "seamless_blend": self.seamless_blend,
+            "tiling_grid_x": self.tiling_grid_x,
+            "tiling_grid_y": self.tiling_grid_y,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> TexturePrepSettings:
+        return cls(
+            brightness=float(data.get("brightness", 0.0)),
+            contrast=float(data.get("contrast", 0.0)),
+            saturation=float(data.get("saturation", 0.0)),
+            red_gain=float(data.get("red_gain", 1.0)),
+            green_gain=float(data.get("green_gain", 1.0)),
+            blue_gain=float(data.get("blue_gain", 1.0)),
+            equalize_light=float(data.get("equalize_light", 0.0)),
+            seamless_enabled=bool(data.get("seamless_enabled", False)),
+            seamless_blend=float(data.get("seamless_blend", 0.20)),
+            tiling_grid_x=int(data.get("tiling_grid_x", 3)),
+            tiling_grid_y=int(data.get("tiling_grid_y", 3)),
+        )
+
+
+@dataclass
 class Document:
     """Documento de trabajo principal."""
 
@@ -138,6 +186,7 @@ class Document:
     texture_ripper: TextureRipperData = field(default_factory=TextureRipperData)
     sprites: list[SpriteRegion] = field(default_factory=list)
     atlas: AtlasSettings = field(default_factory=AtlasSettings)
+    texture_prep: TexturePrepSettings = field(default_factory=TexturePrepSettings)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     modified_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     is_modified: bool = False
@@ -163,6 +212,7 @@ class Document:
             "texture_ripper": self.texture_ripper.to_dict(),
             "sprites": [s.to_dict() for s in self.sprites],
             "atlas": self.atlas.to_dict(),
+            "texture_prep": self.texture_prep.to_dict(),
         }
 
     @classmethod
@@ -179,6 +229,12 @@ class Document:
         atlas = (
             AtlasSettings.from_dict(atlas_data) if isinstance(atlas_data, dict) else AtlasSettings()
         )
+        prep_data = data.get("texture_prep", {})
+        texture_prep = (
+            TexturePrepSettings.from_dict(prep_data)
+            if isinstance(prep_data, dict)
+            else TexturePrepSettings()
+        )
 
         return cls(
             project_name=project_name,
@@ -187,6 +243,7 @@ class Document:
             texture_ripper=TextureRipperData.from_dict(ripper_data),
             sprites=sprites,
             atlas=atlas,
+            texture_prep=texture_prep,
             created_at=str(data.get("created_at", datetime.now(UTC).isoformat())),
             modified_at=str(data.get("modified_at", datetime.now(UTC).isoformat())),
             is_modified=False,
