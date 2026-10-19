@@ -1,0 +1,31 @@
+"""Puente entre arreglos NumPy del motor de imágenes y tipos de imagen de Qt."""
+
+from __future__ import annotations
+
+import numpy as np
+from numpy.typing import NDArray
+from PySide6.QtGui import QImage
+
+
+def rgba_array_to_qimage(pixels: NDArray[np.uint8]) -> QImage:
+    """Convierte un arreglo ``(alto, ancho, 4)`` RGBA ``uint8`` en una ``QImage``.
+
+    La ``QImage`` devuelta posee su propia copia de los datos, de modo que no
+    depende del ciclo de vida del arreglo de origen (que es de solo lectura).
+    """
+    if pixels.dtype != np.uint8 or pixels.ndim != 3 or pixels.shape[2] != 4:
+        raise ValueError(
+            f"Se esperaba un arreglo RGBA uint8 (alto, ancho, 4); se recibió "
+            f"{pixels.dtype} {pixels.shape}"
+        )
+    height, width = int(pixels.shape[0]), int(pixels.shape[1])
+    contiguous = np.ascontiguousarray(pixels)
+    view = QImage(
+        contiguous.tobytes(),
+        width,
+        height,
+        width * 4,
+        QImage.Format.Format_RGBA8888,
+    )
+    # ``copy()`` desacopla la imagen del búfer temporal de bytes.
+    return view.copy()
