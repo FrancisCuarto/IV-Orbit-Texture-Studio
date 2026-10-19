@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from iv_orbit_texture_studio.core.region import SpriteRegion
 from iv_orbit_texture_studio.imaging.perspective import InterpolationMode, Point, Quad
 
 
@@ -95,6 +96,39 @@ class TextureRipperData:
 
 
 @dataclass
+class AtlasSettings:
+    """Configuración para el empaquetado del atlas de sprites."""
+
+    padding: int = 2
+    spacing: int = 2
+    max_width: int = 4096
+    max_height: int = 4096
+    power_of_two: bool = True
+    square: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "padding": self.padding,
+            "spacing": self.spacing,
+            "max_width": self.max_width,
+            "max_height": self.max_height,
+            "power_of_two": self.power_of_two,
+            "square": self.square,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AtlasSettings:
+        return cls(
+            padding=int(data.get("padding", 2)),
+            spacing=int(data.get("spacing", 2)),
+            max_width=int(data.get("max_width", 4096)),
+            max_height=int(data.get("max_height", 4096)),
+            power_of_two=bool(data.get("power_of_two", True)),
+            square=bool(data.get("square", False)),
+        )
+
+
+@dataclass
 class Document:
     """Documento de trabajo principal."""
 
@@ -102,6 +136,8 @@ class Document:
     file_path: Path | None = None
     source: SourceImageInfo = field(default_factory=SourceImageInfo)
     texture_ripper: TextureRipperData = field(default_factory=TextureRipperData)
+    sprites: list[SpriteRegion] = field(default_factory=list)
+    atlas: AtlasSettings = field(default_factory=AtlasSettings)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     modified_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     is_modified: bool = False
@@ -125,6 +161,8 @@ class Document:
             "modified_at": self.modified_at,
             "source": self.source.to_dict(),
             "texture_ripper": self.texture_ripper.to_dict(),
+            "sprites": [s.to_dict() for s in self.sprites],
+            "atlas": self.atlas.to_dict(),
         }
 
     @classmethod
@@ -135,12 +173,20 @@ class Document:
 
         source_data = data.get("source", {})
         ripper_data = data.get("texture_ripper", {})
+        sprites_raw = data.get("sprites", [])
+        sprites = [SpriteRegion.from_dict(s) for s in sprites_raw if isinstance(s, dict)]
+        atlas_data = data.get("atlas", {})
+        atlas = (
+            AtlasSettings.from_dict(atlas_data) if isinstance(atlas_data, dict) else AtlasSettings()
+        )
 
         return cls(
             project_name=project_name,
             file_path=file_path,
             source=SourceImageInfo.from_dict(source_data),
             texture_ripper=TextureRipperData.from_dict(ripper_data),
+            sprites=sprites,
+            atlas=atlas,
             created_at=str(data.get("created_at", datetime.now(UTC).isoformat())),
             modified_at=str(data.get("modified_at", datetime.now(UTC).isoformat())),
             is_modified=False,

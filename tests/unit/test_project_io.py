@@ -144,3 +144,33 @@ def test_project_missing_external_source_image(tmp_path: Path):
 
     with pytest.raises(MissingSourceImageError, match="No se pudo cargar la imagen de origen"):
         load_project(proj_file)
+
+
+def test_project_with_sprites_and_atlas(tmp_path: Path):
+    from iv_orbit_texture_studio.core.region import Pivot, PivotMode, Rect, SpriteRegion
+
+    proj_file = tmp_path / "sprites_proj.ivtex"
+    img_bytes = _make_dummy_image_bytes()
+
+    doc = Document(project_name="Proyecto con Sprites")
+    doc.sprites.append(
+        SpriteRegion.create(
+            "sprite_1", Rect(0, 0, 16, 16), Pivot.from_mode(PivotMode.BOTTOM_CENTER)
+        )
+    )
+    doc.sprites.append(
+        SpriteRegion.create("sprite_2", Rect(20, 10, 32, 32), Pivot.from_mode(PivotMode.CENTER))
+    )
+    doc.atlas.spacing = 4
+    doc.atlas.power_of_two = True
+
+    save_project(proj_file, doc, image_bytes=img_bytes)
+
+    loaded, _ = load_project(proj_file)
+    assert len(loaded.sprites) == 2
+    assert loaded.sprites[0].name == "sprite_1"
+    assert loaded.sprites[0].rect == Rect(0, 0, 16, 16)
+    assert loaded.sprites[0].pivot.mode == PivotMode.BOTTOM_CENTER
+    assert loaded.sprites[1].name == "sprite_2"
+    assert loaded.atlas.spacing == 4
+    assert loaded.atlas.power_of_two is True

@@ -4,8 +4,8 @@ Suite de escritorio para extraer, transformar, organizar y preparar texturas y s
 
 ## Estado del proyecto
 
-* **Fase actual:** Fase 3 completada (Proyectos `.ivtex`, contenedor ZIP seguro, persistencia atómica, historial reversible Deshacer/Rehacer con `QUndoStack`).
-* **Próxima fase:** Fase 4 (Herramientas de sprites y generación de atlas).
+* **Fase actual:** Fase 4 completada (Sprites y atlas: detección automática por transparencia, pivotes/anclas configurables, empaquetador 2D MaxRects BSSF sin solapamientos, exportación atómica PNG + JSON estándar, persistencia en `.ivtex`).
+* **Próxima fase:** Fase 5 (PBR y mapas de normales).
 * **Plataforma:** Windows (arquitectura multiplataforma preparada).
 
 ---
@@ -80,6 +80,35 @@ Suite de escritorio para extraer, transformar, organizar y preparar texturas y s
    - Indicador de cambios sin guardar en la barra de título (`*`).
    - Diálogo de confirmación para guardar cambios al abrir otra imagen, abrir otro proyecto o salir de la aplicación.
 
+### Fase 4: Sprites y Atlas
+1. **Detección automática por transparencia (`imaging.sprites`)**:
+   - Análisis de componentes conectados (8-conectividad) sobre el canal alfa mediante OpenCV y NumPy.
+   - Umbral de opacidad alfa configurable (1 a 255), filtro de ruido por área mínima en píxeles y margen/padding perimetral opcional.
+   - Fusión inteligente de rectángulos solapados o contiguos para evitar fragmentación.
+
+2. **Herramienta interactiva de Sprites (`SpriteTool` y `SpritePanel`)**:
+   - Conmutador de modos en barra de menús y herramientas: *Texture Ripper* vs *Sprites y Atlas*.
+   - Superposición visual en el lienzo con contornos de selección, badges con nombre y dimensiones, y crucetas de pivote.
+   - Creación manual mediante arrastre sobre espacio vacío o botón "Agregar".
+   - Desplazamiento y ajuste interactivo de sprites seleccionados con el ratón.
+   - Eliminación con tecla `Supr`/`Backspace` o botón de interfaz.
+   - Tabla interactiva con búsqueda y sincronización bidireccional de selección, nombre y tamaño.
+
+3. **Configuración de Pivotes y Puntos de Ancla**:
+   - Presets estándar listos para motores de juegos: **Centro** `(0.5, 0.5)`, **Pies / Base inferior** `(0.5, 1.0)`, **Superior Izquierda** `(0.0, 0.0)`, **Centro Superior**, **Centro Inferior**, etc.
+   - Coordenadas normalizadas personalizables `(X, Y)` entre `0.0` y `1.0`.
+
+4. **Empaquetador 2D de Atlas (`imaging.atlas`)**:
+   - Algoritmo de empaquetado **MaxRects** con heurística *Best Short Side Fit* (BSSF) para aprovechamiento óptimo del espacio.
+   - Garantía matemática estricta de cero solapamientos entre sprites.
+   - Prevención de sangrado de texturas (*anti-bleeding*): espaciado entre sprites y margen perimetral configurables.
+   - Opciones para forzar dimensiones en Potencia de Dos (**POT**: 256, 512, 1024, 2048, 4096...) y atlas cuadrado (`Ancho == Alto`).
+   - Previsualización en miniatura reactiva con estadísticas en vivo de dimensiones y cantidad de sprites.
+
+5. **Exportación atómica y metadatos estándar (`exporters.atlas_exporter`)**:
+   - Exportación simultánea y atómica de la imagen del atlas (`.png`) y el archivo de metadatos (`.json`).
+   - Formato de metadatos JSON compatible con motores de videojuegos (Godot, Unity, PixiJS, Phaser), incluyendo dimensiones, cuadros (`frame`, `spriteSourceSize`, `sourceSize`) y pivotes normalizados.
+   - Persistencia completa de regiones de sprites y configuraciones de atlas dentro del contenedor de proyecto `.ivtex`.
 
 ---
 

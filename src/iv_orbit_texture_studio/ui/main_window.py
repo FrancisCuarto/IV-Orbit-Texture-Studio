@@ -11,6 +11,7 @@ from PIL import Image
 from PySide6.QtCore import Qt
 from PySide6.QtGui import (
     QAction,
+    QActionGroup,
     QCloseEvent,
     QGuiApplication,
     QKeySequence,
@@ -44,6 +45,7 @@ from iv_orbit_texture_studio.project_io import (
     load_project,
     save_project,
 )
+from iv_orbit_texture_studio.tools.sprites import SpritePanel, SpriteTool
 from iv_orbit_texture_studio.tools.texture_ripper.preview import TextureRipperPanel
 from iv_orbit_texture_studio.tools.texture_ripper.tool import TextureRipperTool
 from iv_orbit_texture_studio.ui.canvas.image_canvas import ImageCanvas
@@ -86,6 +88,20 @@ class MainWindow(QMainWindow):
         )
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_panel)
 
+        # Herramienta Sprites y Atlas
+        self.sprite_tool = SpriteTool(self)
+        self.sprite_panel = SpritePanel(self.sprite_tool, self)
+        self.dock_sprites = QDockWidget(self.tr("Sprites y Atlas"), self)
+        self.dock_sprites.setObjectName("dock_sprites_atlas")
+        self.dock_sprites.setWidget(self.sprite_panel)
+        self.dock_sprites.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_sprites)
+        self.tabifyDockWidget(self.dock_panel, self.dock_sprites)
+        self.dock_panel.raise_()
+
         self._create_actions()
         self._create_menus()
         self._create_toolbar()
@@ -121,9 +137,36 @@ class MainWindow(QMainWindow):
         self.action_export.setShortcut(QKeySequence("Ctrl+E"))
         self.action_export.triggered.connect(self.ripper_panel.export_texture)
 
+        self.action_export_atlas = QAction(self.tr("Exportar &atlas de sprites…"), self)
+        self.action_export_atlas.setShortcut(QKeySequence("Ctrl+Shift+E"))
+        self.action_export_atlas.triggered.connect(self.sprite_panel.export_atlas)
+
         self.action_quit = QAction(self.tr("&Salir"), self)
         self.action_quit.setShortcut(QKeySequence.StandardKey.Quit)
         self.action_quit.triggered.connect(self.close)
+
+        # Modos de trabajo
+        self.mode_group = QActionGroup(self)
+        self.mode_group.setExclusive(True)
+
+        self.action_mode_ripper = QAction(self.tr("Modo &Texture Ripper"), self)
+        self.action_mode_ripper.setCheckable(True)
+        self.action_mode_ripper.setChecked(True)
+        self.action_mode_ripper.triggered.connect(lambda: self.set_mode("ripper"))
+        self.mode_group.addAction(self.action_mode_ripper)
+
+        self.action_mode_sprites = QAction(self.tr("Modo &Sprites y Atlas"), self)
+        self.action_mode_sprites.setCheckable(True)
+        self.action_mode_sprites.setChecked(False)
+        self.action_mode_sprites.triggered.connect(lambda: self.set_mode("sprites"))
+        self.mode_group.addAction(self.action_mode_sprites)
+
+        # Operaciones de sprites
+        self.action_detect_sprites = QAction(self.tr("&Detectar sprites automáticamente"), self)
+        self.action_detect_sprites.triggered.connect(self.sprite_panel.detect_sprites)
+
+        self.action_pack_atlas = QAction(self.tr("&Generar atlas"), self)
+        self.action_pack_atlas.triggered.connect(self.sprite_panel.generate_atlas)
 
         # Edición / Historial
         self.action_undo = self.undo_stack.createUndoAction(self, self.tr("&Deshacer"))
@@ -181,6 +224,7 @@ class MainWindow(QMainWindow):
         menu_file.addAction(self.action_save_project_as)
         menu_file.addSeparator()
         menu_file.addAction(self.action_export)
+        menu_file.addAction(self.action_export_atlas)
         menu_file.addSeparator()
         menu_file.addAction(self.action_quit)
 
@@ -192,12 +236,20 @@ class MainWindow(QMainWindow):
         menu_edit.addAction(self.action_reset_sel)
         menu_edit.addAction(self.action_clear_sel)
 
+        menu_tools = self.menuBar().addMenu(self.tr("&Herramientas"))
+        menu_tools.addAction(self.action_mode_ripper)
+        menu_tools.addAction(self.action_mode_sprites)
+        menu_tools.addSeparator()
+        menu_tools.addAction(self.action_detect_sprites)
+        menu_tools.addAction(self.action_pack_atlas)
+
         menu_view = self.menuBar().addMenu(self.tr("&Ver"))
         for action in self._view_actions:
             menu_view.addAction(action)
 
         menu_window = self.menuBar().addMenu(self.tr("&Ventana"))
         menu_window.addAction(self.dock_panel.toggleViewAction())
+        menu_window.addAction(self.dock_sprites.toggleViewAction())
 
     def _create_toolbar(self) -> None:
         toolbar = self.addToolBar(self.tr("Principal"))
@@ -212,9 +264,29 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.action_redo)
         toolbar.addSeparator()
         toolbar.addAction(self.action_export)
+        toolbar.addAction(self.action_export_atlas)
+        toolbar.addSeparator()
+        toolbar.addAction(self.action_mode_ripper)
+        toolbar.addAction(self.action_mode_sprites)
         toolbar.addSeparator()
         for action in self._view_actions:
             toolbar.addAction(action)
+
+    def set_mode(self, mode: str) -> None:
+        """Cambia el modo activo entre Texture Ripper y Sprites."""
+        if mode == "ripper":
+            self.canvas.set_tool(self.tool)
+            self.dock_panel.show()
+            self.dock_panel.raise_()
+            self.action_mode_ripper.setChecked(True)
+            self.action_mode_sprites.setChecked(False)
+        elif mode == "sprites":
+            self.canvas.set_tool(self.sprite_tool)
+            self.dock_sprites.show()
+            self.dock_sprites.raise_()
+            self.action_mode_ripper.setChecked(False)
+            self.action_mode_sprites.setChecked(True)
+        self._update_actions()
 
     def _create_status_bar(self) -> None:
         self._label_file = QLabel()
@@ -240,10 +312,26 @@ class MainWindow(QMainWindow):
         self.tool.quad_changed_by_user.connect(self._on_quad_changed_by_user)
         self.undo_stack.cleanChanged.connect(self._on_clean_changed)
         self.ripper_panel.export_requested.connect(self._on_export_finished)
+        self.sprite_tool.sprites_changed.connect(self._on_sprites_changed)
+        self.sprite_panel.atlas_exported.connect(self._on_atlas_exported)
 
     def _on_export_finished(self, path: Path) -> None:
         self.statusBar().showMessage(
             self.tr("Textura exportada en: {name}").format(name=path.name), 6000
+        )
+
+    def _on_sprites_changed(self) -> None:
+        self._update_actions()
+        if self.canvas.has_image:
+            self._document.touch_modified()
+            self._update_window_title()
+
+    def _on_atlas_exported(self, image_path: Path, json_path: Path) -> None:
+        self.statusBar().showMessage(
+            self.tr("Atlas exportado: {img} y {json}").format(
+                img=image_path.name, json=json_path.name
+            ),
+            6000,
         )
 
     def _update_actions(self) -> None:
@@ -254,12 +342,16 @@ class MainWindow(QMainWindow):
         self.action_corners.setEnabled(has_image)
         self.action_reset_sel.setEnabled(has_image)
         self.action_clear_sel.setEnabled(has_image and self.tool.selection.count > 0)
+        self.action_detect_sprites.setEnabled(has_image)
+        has_sprites = len(self.sprite_tool.sprites) > 0
+        self.action_pack_atlas.setEnabled(has_image and has_sprites)
+        self.action_export_atlas.setEnabled(has_image and has_sprites)
         for action in self._view_actions:
             action.setEnabled(has_image)
 
     def _update_window_title(self) -> None:
         proj_name = self._document.project_name
-        dirty = "*" if not self.undo_stack.isClean() else ""
+        dirty = "*" if (not self.undo_stack.isClean() or self._document.is_modified) else ""
         self.setWindowTitle(f"{proj_name}{dirty} — {APP_TITLE}")
 
     def _on_clean_changed(self, is_clean: bool) -> None:
@@ -292,7 +384,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------- ciclo de vida
     def maybe_save_changes(self) -> bool:
         """Verifica si hay cambios pendientes y solicita confirmación al usuario."""
-        if not self.prompt_on_close or not self.canvas.has_image or self.undo_stack.isClean():
+        if not self.prompt_on_close or not self.canvas.has_image:
+            return True
+        if self.undo_stack.isClean() and not self._document.is_modified:
             return True
 
         reply = QMessageBox.question(
@@ -327,8 +421,10 @@ class MainWindow(QMainWindow):
         self.canvas.clear_image()
         self.tool.selection.clear()
         self.tool.selection_changed.emit()
+        self.sprite_tool.clear()
         self.undo_stack.clear()
         self.ripper_panel.set_source_image(None)
+        self.sprite_panel.set_source_image(None)
         self._update_window_title()
         self._update_actions()
         self._refresh_status()
@@ -376,9 +472,11 @@ class MainWindow(QMainWindow):
             source=SourceImageInfo(file_path=str(path)),
         )
         self.undo_stack.clear()
+        self.sprite_tool.clear()
 
         self.canvas.set_image(qimage)
         self.ripper_panel.set_source_image(loaded)
+        self.sprite_panel.set_source_image(loaded)
         self._update_window_title()
         self._update_actions()
         self._refresh_status()
@@ -438,6 +536,7 @@ class MainWindow(QMainWindow):
         # Restaurar vista e imagen
         self.canvas.set_image(qimage)
         self.ripper_panel.set_source_image(loaded)
+        self.sprite_panel.set_source_image(loaded)
 
         # Restaurar parámetros de Texture Ripper
         self.ripper_panel.set_dimensions(
@@ -450,6 +549,10 @@ class MainWindow(QMainWindow):
             self.tool.set_quad(doc.texture_ripper.quad)
         else:
             self.tool.clear()
+
+        # Restaurar sprites y atlas
+        self.sprite_tool.set_sprites(list(doc.sprites))
+        self.sprite_panel.set_atlas_settings(doc.atlas)
 
         self._update_window_title()
         self._update_actions()
@@ -510,12 +613,17 @@ class MainWindow(QMainWindow):
         self._document.texture_ripper.lock_aspect_ratio = self.ripper_panel.lock_aspect_ratio
         self._document.texture_ripper.interpolation = self.ripper_panel.interpolation_mode
 
+        # Sincronizar sprites y atlas
+        self._document.sprites = list(self.sprite_tool.sprites)
+        self._document.atlas = self.sprite_panel.get_atlas_settings()
+
         img_bytes = self._get_current_image_bytes()
 
         try:
             save_project(path, self._document, image_bytes=img_bytes, embed_image=True)
             self._last_directory = path.parent
             self.undo_stack.setClean()
+            self._document.mark_clean(path)
             self._update_window_title()
             self.statusBar().showMessage(
                 self.tr("Proyecto guardado: {name}").format(name=path.name), 4000

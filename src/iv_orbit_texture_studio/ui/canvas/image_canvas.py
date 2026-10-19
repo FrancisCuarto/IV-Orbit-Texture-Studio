@@ -15,6 +15,7 @@ Interacción actual (Fase 1):
 from __future__ import annotations
 
 import contextlib
+from typing import Any
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
@@ -36,7 +37,7 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 from iv_orbit_texture_studio.ui.canvas.coordinate_mapper import CoordinateMapper, Point, Size
 
 if False:  # TYPE_CHECKING
-    from iv_orbit_texture_studio.tools.texture_ripper.tool import TextureRipperTool
+    pass
 
 #: Factor de zoom por "paso" de rueda (120 unidades de ``angleDelta``).
 WHEEL_ZOOM_STEP = 1.25
@@ -83,7 +84,7 @@ class ImageCanvas(QWidget):
         self._pan_anchor: QPointF | None = None
         self._space_held = False
         self._checker_brush: QBrush | None = None
-        self._tool: TextureRipperTool | None = None
+        self._tool: Any = None
 
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -92,17 +93,23 @@ class ImageCanvas(QWidget):
         self.setAccessibleName(self.tr("Lienzo de imagen"))
 
     @property
-    def tool(self) -> TextureRipperTool | None:
+    def tool(self) -> Any:
         return self._tool
 
-    def set_tool(self, tool: TextureRipperTool | None) -> None:
+    def set_tool(self, tool: Any) -> None:
         if self._tool is not None:
             with contextlib.suppress(RuntimeError, TypeError):
-                self._tool.selection_changed.disconnect(self.update)
+                if hasattr(self._tool, "selection_changed"):
+                    self._tool.selection_changed.disconnect(self.update)
+                if hasattr(self._tool, "sprites_changed"):
+                    self._tool.sprites_changed.disconnect(self.update)
         self._tool = tool
         if self._tool is not None:
-            self._tool.selection_changed.connect(self.update)
-            if self._image_size is not None:
+            if hasattr(self._tool, "selection_changed"):
+                self._tool.selection_changed.connect(self.update)
+            if hasattr(self._tool, "sprites_changed"):
+                self._tool.sprites_changed.connect(self.update)
+            if self._image_size is not None and hasattr(self._tool, "set_image_size"):
                 self._tool.set_image_size(self._image_size)
         self.update()
 
@@ -336,9 +343,12 @@ class ImageCanvas(QWidget):
     def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: N802 (API de Qt)
         self._pan_anchor = None
         self._space_held = False
-        if self._tool is not None and self._tool.selection.dragged_index is not None:
-            self._tool.selection.dragged_index = None
-            self._tool.selection_changed.emit()
+        if self._tool is not None and hasattr(self._tool, "selection"):
+            sel = getattr(self._tool, "selection", None)
+            if sel is not None and getattr(sel, "dragged_index", None) is not None:
+                sel.dragged_index = None
+                if hasattr(self._tool, "selection_changed"):
+                    self._tool.selection_changed.emit()
         self._update_idle_cursor()
         super().focusOutEvent(event)
 
