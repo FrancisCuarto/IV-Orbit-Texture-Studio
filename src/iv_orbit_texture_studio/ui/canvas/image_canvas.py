@@ -14,6 +14,8 @@ Interacción actual (Fase 1):
 
 from __future__ import annotations
 
+import contextlib
+
 from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
@@ -31,6 +33,9 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from iv_orbit_texture_studio.ui.canvas.coordinate_mapper import CoordinateMapper, Point, Size
+
+if False:  # TYPE_CHECKING
+    from iv_orbit_texture_studio.tools.texture_ripper.tool import TextureRipperTool
 
 #: Factor de zoom por "paso" de rueda (120 unidades de ``angleDelta``).
 WHEEL_ZOOM_STEP = 1.25
@@ -76,12 +81,28 @@ class ImageCanvas(QWidget):
         self._pan_anchor: QPointF | None = None
         self._space_held = False
         self._checker_brush: QBrush | None = None
+        self._tool: TextureRipperTool | None = None
 
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAutoFillBackground(False)
         self.setAccessibleName(self.tr("Lienzo de imagen"))
+
+    @property
+    def tool(self) -> TextureRipperTool | None:
+        return self._tool
+
+    def set_tool(self, tool: TextureRipperTool | None) -> None:
+        if self._tool is not None:
+            with contextlib.suppress(RuntimeError, TypeError):
+                self._tool.selection_changed.disconnect(self.update)
+        self._tool = tool
+        if self._tool is not None:
+            self._tool.selection_changed.connect(self.update)
+            if self._image_size is not None:
+                self._tool.set_image_size(self._image_size)
+        self.update()
 
     # ------------------------------------------------------------- propiedades
     @property
@@ -110,11 +131,15 @@ class ImageCanvas(QWidget):
             raise ValueError("No se puede mostrar una imagen vacía")
         self._image = image
         self._image_size = Size(float(image.width()), float(image.height()))
+        if self._tool is not None:
+            self._tool.set_image_size(self._image_size)
         self.fit_to_view()
 
     def clear_image(self) -> None:
         self._image = None
         self._image_size = None
+        if self._tool is not None:
+            self._tool.set_image_size(None)
         self._mapper.reset()
         self._fit_mode = True
         self.update()
@@ -209,6 +234,11 @@ class ImageCanvas(QWidget):
         )
         painter.setTransform(QTransform(zoom, 0.0, 0.0, zoom, offset.x, offset.y))
         painter.drawImage(QPointF(0.0, 0.0), self._image)
+
+        # Dibujar superposición de la herramienta activa (vértices, cuadrilátero)
+        if self._tool is not None:
+            self._tool.paint_overlay(painter, self._mapper)
+
         painter.end()
 
     # ---------------------------------------------------------------- eventos
@@ -235,7 +265,7 @@ class ImageCanvas(QWidget):
 
     def _is_pan_press(self, event: QMouseEvent) -> bool:
         button = event.button()
-        return button == Qt.MouseButton.MiddleButton or button == Qt.MouseButton.LeftButton
+        return button == Qt.MouseButton.MiddleButton or self._space_held
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802 (API de Qt)
         if self._image_size is not None and self._is_pan_press(event):
@@ -243,6 +273,16 @@ class ImageCanvas(QWidget):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
+
+        if (
+            self._image_size is not None
+            and self._tool is not None
+            and self._tool.handle_mouse_press(event, self._mapper)
+        ):
+            self.update()
+            event.accept()
+            return
+
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802 (API de Qt)
@@ -251,21 +291,42 @@ class ImageCanvas(QWidget):
             delta = position - self._pan_anchor
             self._pan_anchor = position
             self.pan_by(delta.x(), delta.y())
+        elif self._tool is not None:
+            handled = self._tool.handle_mouse_move(event, self._mapper)
+            tool_cursor = self._tool.get_cursor()
+            if tool_cursor is not None:
+                self.setCursor(tool_cursor)
+            else:
+                self._update_idle_cursor()
+            if handled:
+                self.update()
+
         self._emit_cursor(position)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 (API de Qt)
-        if self._pan_anchor is not None and self._is_pan_press(event):
+        if self._pan_anchor is not None:
             self._pan_anchor = None
             self._update_idle_cursor()
             event.accept()
             return
+
+        if self._tool is not None and self._tool.handle_mouse_release(event, self._mapper):
+            self.update()
+            self._update_idle_cursor()
+            event.accept()
+            return
+
         super().mouseReleaseEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 (API de Qt)
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
             self._space_held = True
             self._update_idle_cursor()
+            event.accept()
+            return
+        if self._tool is not None and self._tool.handle_key_press(event):
+            self.update()
             event.accept()
             return
         super().keyPressEvent(event)

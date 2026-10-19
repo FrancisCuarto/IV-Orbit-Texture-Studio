@@ -4,16 +4,17 @@ Suite de escritorio para extraer, transformar, organizar y preparar texturas y s
 
 ## Estado del proyecto
 
-* **Fase actual:** Fase 1 completada (Aplicación base con lienzo interactivo y coordenadas verificadas).
-* **Próxima fase:** Fase 2 (Texture Ripper: selección de 4 esquinas y rectificación de perspectiva con homografías).
+* **Fase actual:** Fase 2 completada (Texture Ripper: selección interactiva de 4 esquinas, homografías, rectificación y exportación).
+* **Próxima fase:** Fase 3 (Proyectos e historial: formato `.ivtex`, guardar/abrir proyectos, deshacer y rehacer).
 * **Plataforma:** Windows (arquitectura multiplataforma preparada).
 
 ---
 
-## Características implementadas (Fase 1)
+## Características implementadas
 
+### Fase 1: Aplicación base y lienzo
 1. **Ventana principal funcional en PySide6**:
-   - Barra de menús (`Archivo`, `Ver`), barra de herramientas y barra de estado informativa.
+   - Barra de menús (`Archivo`, `Ver`, `Ventana`), barra de herramientas y barra de estado informativa.
    - Apertura de imágenes mediante diálogo nativo o argumento de línea de comandos.
    - Mensajes de error claros e informativos ante formatos dañados, archivos inexistentes o tamaños excesivos.
 
@@ -21,20 +22,44 @@ Suite de escritorio para extraer, transformar, organizar y preparar texturas y s
    - Fondo de tablero de ajedrez para visualizar áreas con transparencia (canal alfa).
    - Zoom suave y centrado en la posición del cursor mediante la rueda del ratón.
    - Controles de zoom dedicados: *Acercar* (`Ctrl++`), *Alejar* (`Ctrl+-`), *Ajustar a ventana* (`Ctrl+0`) y *Tamaño real (100 %)* (`Ctrl+1`).
-   - Paneo/desplazamiento continuo mediante arrastre con botón central, botón izquierdo o manteniendo la barra espaciadora.
+   - Paneo/desplazamiento continuo mediante arrastre con botón central o manteniendo la barra espaciadora.
    - Centrado de imagen sin modificar la escala (`Ctrl+Shift+C`).
-   - Muestreo suave al alejar y píxeles nítidos (*nearest-neighbor*) a partir de zoom 200 % para facilitar la inspección de píxeles individuales.
+   - Muestreo suave al alejar y píxeles nítidos (*nearest-neighbor*) a partir de zoom 200 %.
 
 3. **Mapeo desacoplado de coordenadas (`CoordinateMapper`)**:
-   - Conversión bidireccional exacta entre coordenadas de pantalla (widget) y coordenadas lógicas de imagen (píxel exacto).
-   - Completamente independiente de Qt, permitiendo pruebas unitarias deterministas sin entorno gráfico.
-   - Indicador de coordenadas del cursor en tiempo real en la barra de estado.
+   - Conversión bidireccional exacta entre coordenadas de pantalla y coordenadas lógicas de imagen.
+   - Totalmente independiente de Qt para pruebas unitarias deterministas.
 
 4. **Motor de carga y validación de imágenes (`imaging.image_io`)**:
-   - Desacoplado de la interfaz gráfica.
-   - Normalización a arreglos NumPy RGBA `uint8` protegidos contra escritura (`read-only`) para evitar mutaciones de los datos originales.
-   - Lectura de metadatos de cabecera previa para validar límites de memoria y dimensiones antes de decodificar.
-   - Corrección automática de orientación EXIF.
+   - Normalización a arreglos NumPy RGBA `uint8` protegidos contra escritura (`read-only`).
+   - Validación de cabecera previa para límites de memoria y orientación EXIF automática.
+
+### Fase 2: Texture Ripper (Extracción y rectificación)
+1. **Selección interactiva de 4 esquinas (`SelectionModel` y `TextureRipperTool`)**:
+   - 4 asas circulares numeradas con etiquetas de coordenadas en tiempo real.
+   - Arrastre interactivo de vértices con detección de colisión (*hit test*) en espacio de pantalla.
+   - Modo de colocación punto a punto (1..4 clics) con línea guía punteada al cursor.
+   - Inicialización automática de cuadrilátero centrado al cargar una imagen.
+   - Botones para restablecer a rectángulo por defecto o limpiar para marcado manual.
+   - Validación geométrica rigurosa: detección y rechazo de auto-intersecciones (efecto corbatín/reloj de arena), formas cóncavas, colinealidad o áreas degeneradas (< 1 px²).
+
+2. **Motor de rectificación y homografías (`imaging.perspective`)**:
+   - Mapeo de perspectiva puro mediante homografías 3x3 de OpenCV (`cv2.getPerspectiveTransform` y `cv2.warpPerspective`).
+   - Estimación automática de dimensiones de salida basada en las longitudes de los bordes opuestos para preservar la máxima resolución disponible.
+   - Múltiples métodos de interpolación configurables: **Lanczos4** (alta calidad por defecto), **Bicúbica**, **Bilineal** y **Vecino más cercano** (para pixel art).
+
+3. **Panel de control y previsualización en vivo (`TextureRipperPanel`)**:
+   - Panel acoplable y redimensionable en el lateral derecho de la ventana.
+   - Control numérico de dimensiones de salida (ancho y alto).
+   - Casilla de bloqueo de proporción (*Aspect Ratio Lock*).
+   - Botón de cálculo de dimensiones estimadas.
+   - Previsualización en vivo en miniatura generada de forma reactiva con escalado adaptativo para mantener la fluidez.
+
+4. **Exportación atómica (`exporters.image_exporter`)**:
+   - Exportación a **PNG**, **JPEG**, **WebP**, **BMP** y **Targa (.tga)**.
+   - Composición limpia del canal alfa sobre fondo configurable para formatos sin transparencia (JPEG/BMP).
+   - Escritura atómica mediante reemplazo de archivo temporal para evitar archivos dañados ante interrupciones.
+
 
 ---
 

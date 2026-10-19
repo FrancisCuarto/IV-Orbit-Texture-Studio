@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import QFileDialog, QLabel, QMainWindow, QMessageBox, QWidget
+from PySide6.QtWidgets import QDockWidget, QFileDialog, QLabel, QMainWindow, QMessageBox, QWidget
 
 from iv_orbit_texture_studio.imaging.image_io import (
     ImageLoadError,
@@ -15,6 +15,8 @@ from iv_orbit_texture_studio.imaging.image_io import (
     load_image,
     open_dialog_filter,
 )
+from iv_orbit_texture_studio.tools.texture_ripper.preview import TextureRipperPanel
+from iv_orbit_texture_studio.tools.texture_ripper.tool import TextureRipperTool
 from iv_orbit_texture_studio.ui.canvas.image_canvas import ImageCanvas
 from iv_orbit_texture_studio.ui.qt_image import rgba_array_to_qimage
 
@@ -37,6 +39,20 @@ class MainWindow(QMainWindow):
         self.canvas = ImageCanvas(self)
         self.setCentralWidget(self.canvas)
 
+        # Herramienta Texture Ripper y panel de control
+        self.tool = TextureRipperTool(self)
+        self.canvas.set_tool(self.tool)
+
+        self.ripper_panel = TextureRipperPanel(self.tool, self)
+        self.dock_panel = QDockWidget(self.tr("Texture Ripper"), self)
+        self.dock_panel.setObjectName("dock_texture_ripper")
+        self.dock_panel.setWidget(self.ripper_panel)
+        self.dock_panel.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_panel)
+
         self._create_actions()
         self._create_menus()
         self._create_toolbar()
@@ -49,6 +65,10 @@ class MainWindow(QMainWindow):
         self.action_open = QAction(self.tr("&Abrir imagen…"), self)
         self.action_open.setShortcut(QKeySequence.StandardKey.Open)
         self.action_open.triggered.connect(self.open_image_dialog)
+
+        self.action_export = QAction(self.tr("&Exportar textura rectificada…"), self)
+        self.action_export.setShortcut(QKeySequence("Ctrl+E"))
+        self.action_export.triggered.connect(self.ripper_panel.export_texture)
 
         self.action_quit = QAction(self.tr("&Salir"), self)
         self.action_quit.setShortcut(QKeySequence.StandardKey.Quit)
@@ -85,6 +105,7 @@ class MainWindow(QMainWindow):
     def _create_menus(self) -> None:
         menu_file = self.menuBar().addMenu(self.tr("&Archivo"))
         menu_file.addAction(self.action_open)
+        menu_file.addAction(self.action_export)
         menu_file.addSeparator()
         menu_file.addAction(self.action_quit)
 
@@ -92,11 +113,15 @@ class MainWindow(QMainWindow):
         for action in self._view_actions:
             menu_view.addAction(action)
 
+        menu_window = self.menuBar().addMenu(self.tr("&Ventana"))
+        menu_window.addAction(self.dock_panel.toggleViewAction())
+
     def _create_toolbar(self) -> None:
         toolbar = self.addToolBar(self.tr("Principal"))
         toolbar.setObjectName("main_toolbar")
         toolbar.setMovable(False)
         toolbar.addAction(self.action_open)
+        toolbar.addAction(self.action_export)
         toolbar.addSeparator()
         for action in self._view_actions:
             toolbar.addAction(action)
@@ -120,9 +145,17 @@ class MainWindow(QMainWindow):
         self.canvas.view_changed.connect(self._on_view_changed)
         self.canvas.cursor_moved.connect(self._on_cursor_moved)
         self.canvas.cursor_left.connect(self._on_cursor_left)
+        self.tool.selection_changed.connect(self._update_actions)
+        self.ripper_panel.export_requested.connect(self._on_export_finished)
+
+    def _on_export_finished(self, path: Path) -> None:
+        self.statusBar().showMessage(
+            self.tr("Textura exportada en: {name}").format(name=path.name), 6000
+        )
 
     def _update_actions(self) -> None:
         has_image = self.canvas.has_image
+        self.action_export.setEnabled(has_image and self.tool.selection.is_valid())
         for action in self._view_actions:
             action.setEnabled(has_image)
 
@@ -160,6 +193,7 @@ class MainWindow(QMainWindow):
         self._current_image = loaded
         self._last_directory = path.parent
         self.canvas.set_image(qimage)
+        self.ripper_panel.set_source_image(loaded)
         self.setWindowTitle(f"{path.name} — {APP_TITLE}")
         self._update_actions()
         self._refresh_status()
