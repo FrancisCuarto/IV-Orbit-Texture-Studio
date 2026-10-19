@@ -20,6 +20,7 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
+    QFocusEvent,
     QImage,
     QKeyEvent,
     QMouseEvent,
@@ -42,7 +43,8 @@ WHEEL_ZOOM_STEP = 1.25
 #: Factor de zoom de los comandos Acercar / Alejar.
 BUTTON_ZOOM_STEP = 1.25
 #: Margen en píxeles de pantalla al ajustar la imagen a la ventana.
-FIT_MARGIN = 16.0
+FIT_MARGIN = 48.0
+
 #: A partir de este zoom se dibujan píxeles nítidos (vecino más cercano).
 PIXELATED_ZOOM_THRESHOLD = 2.0
 
@@ -283,6 +285,14 @@ class ImageCanvas(QWidget):
             event.accept()
             return
 
+        # Si el usuario hace clic izquierdo en espacio vacío y la herramienta no lo consumió,
+        # activar desplazamiento (pan)
+        if self._image_size is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._pan_anchor = event.position()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802 (API de Qt)
@@ -305,19 +315,32 @@ class ImageCanvas(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802 (API de Qt)
+        tool_handled = False
+        if self._tool is not None:
+            tool_handled = self._tool.handle_mouse_release(event, self._mapper)
+
         if self._pan_anchor is not None:
             self._pan_anchor = None
             self._update_idle_cursor()
             event.accept()
             return
 
-        if self._tool is not None and self._tool.handle_mouse_release(event, self._mapper):
+        if tool_handled:
             self.update()
             self._update_idle_cursor()
             event.accept()
             return
 
         super().mouseReleaseEvent(event)
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: N802 (API de Qt)
+        self._pan_anchor = None
+        self._space_held = False
+        if self._tool is not None and self._tool.selection.dragged_index is not None:
+            self._tool.selection.dragged_index = None
+            self._tool.selection_changed.emit()
+        self._update_idle_cursor()
+        super().focusOutEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802 (API de Qt)
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():

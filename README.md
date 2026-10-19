@@ -4,17 +4,24 @@ Suite de escritorio para extraer, transformar, organizar y preparar texturas y s
 
 ## Estado del proyecto
 
-* **Fase actual:** Fase 2 completada (Texture Ripper: selección interactiva de 4 esquinas, homografías, rectificación y exportación).
-* **Próxima fase:** Fase 3 (Proyectos e historial: formato `.ivtex`, guardar/abrir proyectos, deshacer y rehacer).
+* **Fase actual:** Fase 3 completada (Proyectos `.ivtex`, contenedor ZIP seguro, persistencia atómica, historial reversible Deshacer/Rehacer con `QUndoStack`).
+* **Próxima fase:** Fase 4 (Herramientas de sprites y generación de atlas).
 * **Plataforma:** Windows (arquitectura multiplataforma preparada).
 
 ---
 
 ## Características implementadas
 
+### Correcciones de interacción y experiencia de usuario (Fase 2+)
+* **Acceso completo a esquinas y bordes**: Margen de ajuste ampliado (`FIT_MARGIN = 48.0 px`) para que los vértices no queden apretados contra los bordes de la ventana.
+* **Atracción magnética (Snapping)**: Imán inteligente (`SNAP_THRESHOLD_PX = 14.0 px`) que ajusta los vértices automáticamente a los límites exactos de la imagen `(0, 0)`, `(ancho, alto)`.
+* **Botón "Ajustar a esquinas"**: 1 clic para posicionar inmediatamente los 4 vértices en las 4 esquinas exactas de la imagen.
+* **Solución de bloqueo de vértices**: Salvaguarda contra liberación de ratón fuera de la ventana; si el botón izquierdo no está presionado, el vértice arrastrado se libera inmediatamente, permitiendo seleccionar los demás sin trabarse.
+* **Desplazamiento intuitivo (Pan)**: Clic izquierdo y arrastre sobre el fondo del lienzo desplaza la imagen automáticamente sin necesidad de botón central o barra espaciadora.
+
 ### Fase 1: Aplicación base y lienzo
 1. **Ventana principal funcional en PySide6**:
-   - Barra de menús (`Archivo`, `Ver`, `Ventana`), barra de herramientas y barra de estado informativa.
+   - Barra de menús (`Archivo`, `Editar`, `Ver`, `Ventana`), barra de herramientas y barra de estado informativa.
    - Apertura de imágenes mediante diálogo nativo o argumento de línea de comandos.
    - Mensajes de error claros e informativos ante formatos dañados, archivos inexistentes o tamaños excesivos.
 
@@ -22,7 +29,7 @@ Suite de escritorio para extraer, transformar, organizar y preparar texturas y s
    - Fondo de tablero de ajedrez para visualizar áreas con transparencia (canal alfa).
    - Zoom suave y centrado en la posición del cursor mediante la rueda del ratón.
    - Controles de zoom dedicados: *Acercar* (`Ctrl++`), *Alejar* (`Ctrl+-`), *Ajustar a ventana* (`Ctrl+0`) y *Tamaño real (100 %)* (`Ctrl+1`).
-   - Paneo/desplazamiento continuo mediante arrastre con botón central o manteniendo la barra espaciadora.
+   - Paneo/desplazamiento continuo mediante arrastre con botón izquierdo en espacio vacío, botón central o manteniendo la barra espaciadora.
    - Centrado de imagen sin modificar la escala (`Ctrl+Shift+C`).
    - Muestreo suave al alejar y píxeles nítidos (*nearest-neighbor*) a partir de zoom 200 %.
 
@@ -37,10 +44,10 @@ Suite de escritorio para extraer, transformar, organizar y preparar texturas y s
 ### Fase 2: Texture Ripper (Extracción y rectificación)
 1. **Selección interactiva de 4 esquinas (`SelectionModel` y `TextureRipperTool`)**:
    - 4 asas circulares numeradas con etiquetas de coordenadas en tiempo real.
-   - Arrastre interactivo de vértices con detección de colisión (*hit test*) en espacio de pantalla.
+   - Arrastre interactivo de vértices con detección de colisión (*hit test*) en espacio de pantalla con radio ampliado a 28 px.
    - Modo de colocación punto a punto (1..4 clics) con línea guía punteada al cursor.
    - Inicialización automática de cuadrilátero centrado al cargar una imagen.
-   - Botones para restablecer a rectángulo por defecto o limpiar para marcado manual.
+   - Botones para restablecer a rectángulo por defecto, ajustar a esquinas o limpiar para marcado manual.
    - Validación geométrica rigurosa: detección y rechazo de auto-intersecciones (efecto corbatín/reloj de arena), formas cóncavas, colinealidad o áreas degeneradas (< 1 px²).
 
 2. **Motor de rectificación y homografías (`imaging.perspective`)**:
@@ -59,6 +66,19 @@ Suite de escritorio para extraer, transformar, organizar y preparar texturas y s
    - Exportación a **PNG**, **JPEG**, **WebP**, **BMP** y **Targa (.tga)**.
    - Composición limpia del canal alfa sobre fondo configurable para formatos sin transparencia (JPEG/BMP).
    - Escritura atómica mediante reemplazo de archivo temporal para evitar archivos dañados ante interrupciones.
+
+### Fase 3: Proyectos e historial
+1. **Formato de proyecto `.ivtex`**:
+   - Contenedor ZIP estándar y portable con documento `project.json` y carpeta de recursos `assets/`.
+   - Empaquetado automático de la imagen de origen para proyectos 100 % autónomos y portables entre equipos.
+   - Hash SHA-256 de integridad para verificar el archivo de imagen de origen.
+   - Protección de seguridad estricta: prevención de ataques ZipSlip (bloqueo de paths con `..` o absolutos) y límites contra descompresión excesiva (zip bombs).
+   - Persistencia atómica mediante archivo temporal intermedio y reemplazo atómico en disco.
+
+2. **Historial de Deshacer y Rehacer (`QUndoStack`)**:
+   - Deshacer (`Ctrl+Z`) y Rehacer (`Ctrl+Y` o `Ctrl+Shift+Z`) para movimiento de vértices, cambio de esquinas, restablecimiento y limpieza.
+   - Indicador de cambios sin guardar en la barra de título (`*`).
+   - Diálogo de confirmación para guardar cambios al abrir otra imagen, abrir otro proyecto o salir de la aplicación.
 
 
 ---
@@ -161,6 +181,19 @@ iv-orbit-texture-studio/
 │       ├── main.py                        # Entrypoint de consola
 │       ├── app/
 │       │   └── application.py             # Arranque y configuración de QApplication
+│       ├── core/
+│       │   ├── commands.py                # Comandos reversibles QUndoCommand (MoveVertex, SetQuad, etc.)
+│       │   └── document.py                # Modelo de datos del documento y proyecto activo
+│       ├── project_io/
+│       │   ├── serializer.py              # Contenedor ZIP .ivtex, atomic write, safe extraction (ZipSlip)
+│       │   └── migrations.py              # Manejo de versiones de esquema
+│       ├── tools/
+│       │   └── texture_ripper/
+│       │       ├── tool.py                # Control de interacción, dibujo y snapping magnético
+│       │       ├── selection.py           # Modelo de 4 vértices, estados y validación geométrica
+│       │       └── preview.py             # Panel lateral con previsualización en vivo y controles
+│       ├── exporters/
+│       │   └── image_exporter.py          # Exportador atómico multiformato (PNG, JPG, WebP, BMP, TGA)
 │       ├── ui/
 │       │   ├── main_window.py             # Ventana principal, menús, barras de estado y acciones
 │       │   ├── qt_image.py                # Conversión desacoplada entre ndarray y QImage
@@ -168,15 +201,23 @@ iv-orbit-texture-studio/
 │       │       ├── coordinate_mapper.py   # Lógica matemática pura de zoom/pan y mapeo de coordenadas
 │       │       └── image_canvas.py        # Widget de dibujo y eventos de interacción del usuario
 │       └── imaging/
-│           └── image_io.py                # Carga, validación de dimensiones y normalización RGBA
+│           ├── image_io.py                # Carga, validación de dimensiones y normalización RGBA
+│           └── perspective.py             # Homografías OpenCV, rectificación y validación de quads
 └── tests/
     ├── unit/
+    │   ├── test_commands.py               # Pruebas de comandos deshacer/rehacer y QUndoStack
     │   ├── test_coordinate_mapper.py      # Pruebas matemáticas de escala, traslación y límites
+    │   ├── test_image_exporter.py         # Pruebas de exportación atómica y composición alfa
     │   ├── test_image_io.py               # Pruebas de carga, fallos de formato y límites de tamaño
-    │   └── test_qt_image.py               # Pruebas de conversión ndarray -> QImage
+    │   ├── test_perspective.py            # Pruebas de homografía, estimación de tamaño e interpolación
+    │   ├── test_project_io.py             # Pruebas de guardado/apertura .ivtex, ZipSlip y corrupción
+    │   ├── test_qt_image.py               # Pruebas de conversión ndarray -> QImage
+    │   └── test_selection.py              # Pruebas de ciclo de vida del cuadrilátero y hit-testing
     └── ui/
         ├── test_image_canvas.py           # Pruebas de interacción con ratón y señales del lienzo
-        └── test_main_window.py            # Pruebas de interfaz completa con pytest-qt
+        ├── test_main_window.py            # Pruebas de interfaz completa con pytest-qt
+        ├── test_project_workflow.py       # Pruebas de flujo de proyecto y deshacer/rehacer en UI
+        └── test_texture_ripper_ui.py      # Pruebas de controles, arrastre y snapping del Texture Ripper
 ```
 
 ---
@@ -185,11 +226,18 @@ iv-orbit-texture-studio/
 
 | Acción | Atajo / Control |
 |---|---|
-| Abrir imagen | `Ctrl + O` |
+| Nuevo proyecto | `Ctrl + N` |
+| Abrir imagen… | `Ctrl + O` |
+| Abrir proyecto… | `Ctrl + Shift + O` |
+| Guardar proyecto | `Ctrl + S` |
+| Guardar proyecto como… | `Ctrl + Shift + S` |
+| Deshacer | `Ctrl + Z` |
+| Rehacer | `Ctrl + Y` o `Ctrl + Shift + Z` |
+| Exportar textura rectificada… | `Ctrl + E` |
 | Acercar | `Ctrl + +` o Rueda del ratón hacia arriba |
 | Alejar | `Ctrl + -` o Rueda del ratón hacia abajo |
 | Ajustar a la ventana | `Ctrl + 0` |
 | Tamaño real (100 %) | `Ctrl + 1` |
 | Centrar imagen | `Ctrl + Shift + C` |
-| Paneo / Desplazamiento | Arrastrar con botón central / botón izquierdo / `Espacio` + botón izquierdo |
+| Paneo / Desplazamiento | Arrastrar con botón izquierdo en fondo / botón central / `Espacio` + arrastre |
 | Salir | `Ctrl + Q` |

@@ -35,21 +35,26 @@ COLOR_INVALID_FILL = QColor(255, 60, 60, 45)
 COLOR_INVALID_STROKE = QColor(255, 70, 70, 240)
 
 # Geometría de asas
-HANDLE_RADIUS = 9.0
-HANDLE_RADIUS_HOVER = 12.0
-HIT_RADIUS = 16.0
+HANDLE_RADIUS = 10.0
+HANDLE_RADIUS_HOVER = 14.0
+HIT_RADIUS = 28.0
+SNAP_THRESHOLD_PX = 14.0
 
 
 class TextureRipperTool(QObject):
     """Controla la interacción y el dibujo del cuadrilátero sobre el lienzo."""
 
     selection_changed = Signal()
+    vertex_drag_finished = Signal(int, Point, Point)
+    quad_changed_by_user = Signal(object, object, str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.selection = SelectionModel()
         self._mouse_screen_pos: QPointF | None = None
         self._image_size: Size | None = None
+        self._drag_start_index: int | None = None
+        self._drag_start_point: Point | None = None
 
     def set_image_size(self, size: Size | None) -> None:
         self._image_size = size
@@ -62,14 +67,33 @@ class TextureRipperTool(QObject):
         self.selection.set_quad(quad)
         self.selection_changed.emit()
 
+    def select_image_corners(self) -> None:
+        """Ajusta los 4 vértices exactamente a las 4 esquinas de la imagen."""
+        if self._image_size is not None:
+            old_quad = self.selection.get_quad()
+            w, h = self._image_size.width, self._image_size.height
+            quad = Quad(
+                p0=Point(0.0, 0.0),
+                p1=Point(w, 0.0),
+                p2=Point(w, h),
+                p3=Point(0.0, h),
+            )
+            self.set_quad(quad)
+            self.quad_changed_by_user.emit(old_quad, quad, self.tr("Ajustar a esquinas"))
+
     def reset_to_default(self) -> None:
         if self._image_size is not None:
+            old_quad = self.selection.get_quad()
             self.selection.init_default_rect(self._image_size, margin_ratio=0.10)
             self.selection_changed.emit()
+            new_quad = self.selection.get_quad()
+            self.quad_changed_by_user.emit(old_quad, new_quad, self.tr("Restablecer selección"))
 
     def clear(self) -> None:
+        old_quad = self.selection.get_quad()
         self.selection.clear()
         self.selection_changed.emit()
+        self.quad_changed_by_user.emit(old_quad, None, self.tr("Limpiar selección"))
 
     # -------------------------------------------------------- eventos de ratón
     def handle_mouse_press(
@@ -89,6 +113,9 @@ class TextureRipperTool(QObject):
         hit = self.selection.hit_test_vertex(scr_pt, mapper, radius_screen_px=HIT_RADIUS)
         if hit is not None:
             self.selection.dragged_index = hit
+            self._drag_start_index = hit
+            if hit < len(self.selection.points):
+                self._drag_start_point = self.selection.points[hit]
             self.selection_changed.emit()
             return True
 
@@ -113,13 +140,30 @@ class TextureRipperTool(QObject):
         self._mouse_screen_pos = pos
         scr_pt = Point(pos.x(), pos.y())
 
+        # Salvaguarda: si el botón izquierdo ya no está presionado, terminar arrastre
+        if self.selection.dragged_index is not None and not (
+            event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            self.handle_mouse_release(event, mapper)
+
         # Si estamos arrastrando un vértice
         dragged = self.selection.dragged_index
         if dragged is not None and self._image_size is not None:
             img_pt = mapper.screen_to_image(scr_pt)
-            # Clampear a los límites de la imagen
             cx = min(max(img_pt.x, 0.0), self._image_size.width)
             cy = min(max(img_pt.y, 0.0), self._image_size.height)
+
+            # Imán / atracción magnética a los bordes y esquinas de la imagen
+            if abs(cx) <= SNAP_THRESHOLD_PX:
+                cx = 0.0
+            elif abs(cx - self._image_size.width) <= SNAP_THRESHOLD_PX:
+                cx = self._image_size.width
+
+            if abs(cy) <= SNAP_THRESHOLD_PX:
+                cy = 0.0
+            elif abs(cy - self._image_size.height) <= SNAP_THRESHOLD_PX:
+                cy = self._image_size.height
+
             self.selection.move_vertex(dragged, Point(cx, cy))
             self.selection_changed.emit()
             return True
@@ -138,9 +182,22 @@ class TextureRipperTool(QObject):
         event: QMouseEvent,
         mapper: CoordinateMapper,
     ) -> bool:
-        """Finaliza el arrastre."""
+        """Finaliza el arrastre garantizando que se libere el vértice."""
         if self.selection.dragged_index is not None:
+            dragged = self.selection.dragged_index
             self.selection.dragged_index = None
+
+            if (
+                self._drag_start_index == dragged
+                and self._drag_start_point is not None
+                and dragged < len(self.selection.points)
+            ):
+                end_point = self.selection.points[dragged]
+                if end_point != self._drag_start_point:
+                    self.vertex_drag_finished.emit(dragged, self._drag_start_point, end_point)
+
+            self._drag_start_index = None
+            self._drag_start_point = None
             self.selection_changed.emit()
             return True
         return False

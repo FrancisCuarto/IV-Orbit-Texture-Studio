@@ -158,6 +158,57 @@ def load_image(
     )
 
 
+def load_image_from_bytes(
+    data: bytes,
+    virtual_path: str | Path = "embedded_image.png",
+    *,
+    max_dimension: int = DEFAULT_MAX_DIMENSION,
+    max_pixels: int = DEFAULT_MAX_PIXELS,
+) -> LoadedImage:
+    """Decodifica una imagen desde un búfer en memoria y la normaliza a RGBA."""
+    from io import BytesIO
+
+    file_path = Path(virtual_path)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(data)) as image:
+                error = validate_dimensions(
+                    image.width,
+                    image.height,
+                    max_dimension=max_dimension,
+                    max_pixels=max_pixels,
+                )
+                if error is not None:
+                    raise ImageTooLargeError(error, file_path)
+                source_format = image.format
+                source_mode = image.mode
+                image.load()
+                oriented = ImageOps.exif_transpose(image)
+                rgba = oriented.convert("RGBA")
+    except ImageLoadError:
+        raise
+    except Image.DecompressionBombError as exc:
+        raise ImageTooLargeError(str(exc), file_path) from exc
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError) as exc:
+        raise UnsupportedImageError(
+            f"No se pudo leer la imagen desde los datos en memoria: {exc}",
+            file_path,
+        ) from exc
+
+    pixels = np.asarray(rgba, dtype=np.uint8)
+    if pixels.ndim != 3 or pixels.shape[2] != 4:
+        raise UnsupportedImageError("Forma de imagen inesperada tras la conversión.", file_path)
+    pixels = np.ascontiguousarray(pixels)
+    pixels.setflags(write=False)
+    return LoadedImage(
+        path=file_path,
+        pixels=pixels,
+        source_format=source_format,
+        source_mode=source_mode,
+    )
+
+
 def open_dialog_filter() -> str:
     """Filtro de extensiones para diálogos de archivo (sin dependencia de Qt)."""
     patterns = " ".join(f"*{ext}" for ext in SUPPORTED_EXTENSIONS)

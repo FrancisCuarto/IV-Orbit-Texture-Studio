@@ -190,3 +190,111 @@ def test_texture_ripper_degenerate_warning(qtbot, tmp_path):
     assert not window.ripper_panel._btn_export.isEnabled()
     assert not window.action_export.isEnabled()
     assert "⚠" in window.ripper_panel._label_status.text()
+
+
+def test_texture_ripper_select_corners_and_snapping(qtbot, tmp_path):
+    img_path = tmp_path / "corners_test.png"
+    _create_test_image(img_path, 200, 150)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    window.open_image(img_path)
+
+    tool = window.tool
+    panel = window.ripper_panel
+
+    # Click the "Ajustar a esquinas" button
+    panel._btn_corners.click()
+
+    assert tool.selection.points[0] == Point(0.0, 0.0)
+    assert tool.selection.points[1] == Point(200.0, 0.0)
+    assert tool.selection.points[2] == Point(200.0, 150.0)
+    assert tool.selection.points[3] == Point(0.0, 150.0)
+
+    # Test snapping when dragging handle near edge/corner
+    window.canvas.actual_size()
+    window.canvas.pan_by(-window.canvas.mapper.offset.x, -window.canvas.mapper.offset.y)
+
+    # Press on handle 0 at (0, 0)
+    p0 = QPointF(0.0, 0.0)
+    press_ev = QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        p0,
+        p0,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    window.canvas.mousePressEvent(press_ev)
+    assert tool.selection.dragged_index == 0
+
+    # Drag to (10, 8), which is within SNAP_THRESHOLD_PX (14.0) of (0, 0)
+    p_near = QPointF(10.0, 8.0)
+    drag_ev = QMouseEvent(
+        QMouseEvent.Type.MouseMove,
+        p_near,
+        p_near,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    window.canvas.mouseMoveEvent(drag_ev)
+    # Both x and y should snap to 0.0
+    assert tool.selection.points[0] == Point(0.0, 0.0)
+
+
+def test_texture_ripper_stuck_drag_prevention(qtbot, tmp_path):
+    img_path = tmp_path / "stuck_test.png"
+    _create_test_image(img_path, 200, 200)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+    window.open_image(img_path)
+
+    tool = window.tool
+    canvas = window.canvas
+
+    canvas.actual_size()
+    canvas.pan_by(-canvas.mapper.offset.x, -canvas.mapper.offset.y)
+
+    # Click handle 0
+    p0 = QPointF(tool.selection.points[0].x, tool.selection.points[0].y)
+    press_ev0 = QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        p0,
+        p0,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    canvas.mousePressEvent(press_ev0)
+    assert tool.selection.dragged_index == 0
+
+    # Simulate mouse moving with NO buttons pressed (simulating dropped release event)
+    p_move = QPointF(50.0, 50.0)
+    move_nobutton = QMouseEvent(
+        QMouseEvent.Type.MouseMove,
+        p_move,
+        p_move,
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    canvas.mouseMoveEvent(move_nobutton)
+    # The safeguard must immediately clear dragged_index!
+    assert tool.selection.dragged_index is None
+
+    # Now clicking on handle 1 must work cleanly
+    p1 = QPointF(tool.selection.points[1].x, tool.selection.points[1].y)
+    press_ev1 = QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        p1,
+        p1,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    canvas.mousePressEvent(press_ev1)
+    assert tool.selection.dragged_index == 1

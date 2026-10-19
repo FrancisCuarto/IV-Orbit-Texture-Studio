@@ -3,17 +3,46 @@
 from __future__ import annotations
 
 import logging
+import os
+from io import BytesIO
 from pathlib import Path
 
+from PIL import Image
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
-from PySide6.QtWidgets import QDockWidget, QFileDialog, QLabel, QMainWindow, QMessageBox, QWidget
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QGuiApplication,
+    QKeySequence,
+    QUndoStack,
+)
+from PySide6.QtWidgets import (
+    QDockWidget,
+    QFileDialog,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QWidget,
+)
 
+from iv_orbit_texture_studio.core.commands import MoveVertexCommand, SetQuadCommand
+from iv_orbit_texture_studio.core.document import Document, SourceImageInfo
 from iv_orbit_texture_studio.imaging.image_io import (
     ImageLoadError,
     LoadedImage,
     load_image,
+    load_image_from_bytes,
     open_dialog_filter,
+)
+from iv_orbit_texture_studio.imaging.perspective import Point, Quad
+from iv_orbit_texture_studio.project_io import (
+    CorruptProjectError,
+    MissingSourceImageError,
+    ProjectIOError,
+    UnsupportedVersionError,
+    ZipSlipSecurityError,
+    load_project,
+    save_project,
 )
 from iv_orbit_texture_studio.tools.texture_ripper.preview import TextureRipperPanel
 from iv_orbit_texture_studio.tools.texture_ripper.tool import TextureRipperTool
@@ -23,15 +52,19 @@ from iv_orbit_texture_studio.ui.qt_image import rgba_array_to_qimage
 logger = logging.getLogger(__name__)
 
 APP_TITLE = "IV Orbit Texture Studio"
+PROJECT_FILE_FILTER = "Proyectos IV Orbit (*.ivtex);;Todos los archivos (*)"
 
 
 class MainWindow(QMainWindow):
-    """Ventana principal: menú, barra de herramientas, lienzo y barra de estado."""
+    """Ventana principal: menú, barra de herramientas, lienzo, historial y barra de estado."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._current_image: LoadedImage | None = None
         self._last_directory: Path | None = None
+        self._document: Document = Document()
+        self.undo_stack: QUndoStack = QUndoStack(self)
+        self.prompt_on_close: bool = "PYTEST_CURRENT_TEST" not in os.environ
 
         self.setWindowTitle(APP_TITLE)
         self.resize(1200, 800)
@@ -57,14 +90,32 @@ class MainWindow(QMainWindow):
         self._create_menus()
         self._create_toolbar()
         self._create_status_bar()
-        self._connect_canvas()
+        self._connect_signals()
         self._update_actions()
+        self._update_window_title()
 
     # ---------------------------------------------------------------- acciones
     def _create_actions(self) -> None:
+        # Archivo
+        self.action_new_project = QAction(self.tr("&Nuevo proyecto"), self)
+        self.action_new_project.setShortcut(QKeySequence.StandardKey.New)
+        self.action_new_project.triggered.connect(self.new_project)
+
         self.action_open = QAction(self.tr("&Abrir imagen…"), self)
         self.action_open.setShortcut(QKeySequence.StandardKey.Open)
         self.action_open.triggered.connect(self.open_image_dialog)
+
+        self.action_open_project = QAction(self.tr("Abrir &proyecto…"), self)
+        self.action_open_project.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        self.action_open_project.triggered.connect(self.open_project_dialog)
+
+        self.action_save_project = QAction(self.tr("&Guardar proyecto"), self)
+        self.action_save_project.setShortcut(QKeySequence.StandardKey.Save)
+        self.action_save_project.triggered.connect(self.save_project_dialog)
+
+        self.action_save_project_as = QAction(self.tr("Guardar proyecto &como…"), self)
+        self.action_save_project_as.setShortcut(QKeySequence.StandardKey.SaveAs)
+        self.action_save_project_as.triggered.connect(self.save_project_as_dialog)
 
         self.action_export = QAction(self.tr("&Exportar textura rectificada…"), self)
         self.action_export.setShortcut(QKeySequence("Ctrl+E"))
@@ -74,6 +125,23 @@ class MainWindow(QMainWindow):
         self.action_quit.setShortcut(QKeySequence.StandardKey.Quit)
         self.action_quit.triggered.connect(self.close)
 
+        # Edición / Historial
+        self.action_undo = self.undo_stack.createUndoAction(self, self.tr("&Deshacer"))
+        self.action_undo.setShortcut(QKeySequence.StandardKey.Undo)
+
+        self.action_redo = self.undo_stack.createRedoAction(self, self.tr("&Rehacer"))
+        self.action_redo.setShortcut(QKeySequence.StandardKey.Redo)
+
+        self.action_corners = QAction(self.tr("Ajustar selección a las &esquinas"), self)
+        self.action_corners.triggered.connect(self.tool.select_image_corners)
+
+        self.action_reset_sel = QAction(self.tr("&Restablecer selección inicial"), self)
+        self.action_reset_sel.triggered.connect(self.tool.reset_to_default)
+
+        self.action_clear_sel = QAction(self.tr("&Limpiar selección"), self)
+        self.action_clear_sel.triggered.connect(self.tool.clear)
+
+        # Ver / Navegación
         self.action_zoom_in = QAction(self.tr("A&cercar"), self)
         self.action_zoom_in.setShortcuts([QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")])
         self.action_zoom_in.triggered.connect(self.canvas.zoom_in)
@@ -104,10 +172,25 @@ class MainWindow(QMainWindow):
 
     def _create_menus(self) -> None:
         menu_file = self.menuBar().addMenu(self.tr("&Archivo"))
+        menu_file.addAction(self.action_new_project)
+        menu_file.addSeparator()
         menu_file.addAction(self.action_open)
+        menu_file.addAction(self.action_open_project)
+        menu_file.addSeparator()
+        menu_file.addAction(self.action_save_project)
+        menu_file.addAction(self.action_save_project_as)
+        menu_file.addSeparator()
         menu_file.addAction(self.action_export)
         menu_file.addSeparator()
         menu_file.addAction(self.action_quit)
+
+        menu_edit = self.menuBar().addMenu(self.tr("&Editar"))
+        menu_edit.addAction(self.action_undo)
+        menu_edit.addAction(self.action_redo)
+        menu_edit.addSeparator()
+        menu_edit.addAction(self.action_corners)
+        menu_edit.addAction(self.action_reset_sel)
+        menu_edit.addAction(self.action_clear_sel)
 
         menu_view = self.menuBar().addMenu(self.tr("&Ver"))
         for action in self._view_actions:
@@ -120,7 +203,14 @@ class MainWindow(QMainWindow):
         toolbar = self.addToolBar(self.tr("Principal"))
         toolbar.setObjectName("main_toolbar")
         toolbar.setMovable(False)
+        toolbar.addAction(self.action_new_project)
         toolbar.addAction(self.action_open)
+        toolbar.addAction(self.action_open_project)
+        toolbar.addAction(self.action_save_project)
+        toolbar.addSeparator()
+        toolbar.addAction(self.action_undo)
+        toolbar.addAction(self.action_redo)
+        toolbar.addSeparator()
         toolbar.addAction(self.action_export)
         toolbar.addSeparator()
         for action in self._view_actions:
@@ -141,11 +231,14 @@ class MainWindow(QMainWindow):
         status.addPermanentWidget(self._label_zoom)
         self._refresh_status()
 
-    def _connect_canvas(self) -> None:
+    def _connect_signals(self) -> None:
         self.canvas.view_changed.connect(self._on_view_changed)
         self.canvas.cursor_moved.connect(self._on_cursor_moved)
         self.canvas.cursor_left.connect(self._on_cursor_left)
         self.tool.selection_changed.connect(self._update_actions)
+        self.tool.vertex_drag_finished.connect(self._on_vertex_drag_finished)
+        self.tool.quad_changed_by_user.connect(self._on_quad_changed_by_user)
+        self.undo_stack.cleanChanged.connect(self._on_clean_changed)
         self.ripper_panel.export_requested.connect(self._on_export_finished)
 
     def _on_export_finished(self, path: Path) -> None:
@@ -155,12 +248,98 @@ class MainWindow(QMainWindow):
 
     def _update_actions(self) -> None:
         has_image = self.canvas.has_image
+        self.action_save_project.setEnabled(has_image)
+        self.action_save_project_as.setEnabled(has_image)
         self.action_export.setEnabled(has_image and self.tool.selection.is_valid())
+        self.action_corners.setEnabled(has_image)
+        self.action_reset_sel.setEnabled(has_image)
+        self.action_clear_sel.setEnabled(has_image and self.tool.selection.count > 0)
         for action in self._view_actions:
             action.setEnabled(has_image)
 
-    # ---------------------------------------------------------------- apertura
+    def _update_window_title(self) -> None:
+        proj_name = self._document.project_name
+        dirty = "*" if not self.undo_stack.isClean() else ""
+        self.setWindowTitle(f"{proj_name}{dirty} — {APP_TITLE}")
+
+    def _on_clean_changed(self, is_clean: bool) -> None:
+        self._update_window_title()
+
+    # -------------------------------------------------------- slots de historial
+    def _on_vertex_drag_finished(self, idx: int, old_pt: Point, new_pt: Point) -> None:
+        def apply_pt(i: int, p: Point) -> None:
+            self.tool.selection.move_vertex(i, p)
+            self.tool.selection_changed.emit()
+            self.canvas.update()
+
+        cmd = MoveVertexCommand(idx, old_pt, new_pt, apply_pt)
+        self.undo_stack.push(cmd)
+
+    def _on_quad_changed_by_user(
+        self, old_quad: Quad | None, new_quad: Quad | None, text: str
+    ) -> None:
+        def apply_quad(q: Quad | None) -> None:
+            if q is None:
+                self.tool.selection.clear()
+            else:
+                self.tool.selection.set_quad(q)
+            self.tool.selection_changed.emit()
+            self.canvas.update()
+
+        cmd = SetQuadCommand(old_quad, new_quad, apply_quad, text=text)
+        self.undo_stack.push(cmd)
+
+    # ------------------------------------------------------------- ciclo de vida
+    def maybe_save_changes(self) -> bool:
+        """Verifica si hay cambios pendientes y solicita confirmación al usuario."""
+        if not self.prompt_on_close or not self.canvas.has_image or self.undo_stack.isClean():
+            return True
+
+        reply = QMessageBox.question(
+            self,
+            self.tr("Guardar cambios"),
+            self.tr(
+                "El proyecto tiene cambios no guardados.\n¿Deseás guardarlos antes de continuar?"
+            ),
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+
+        if reply == QMessageBox.StandardButton.Save:
+            return self.save_project_dialog()
+        return reply == QMessageBox.StandardButton.Discard
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 (API de Qt)
+        if self.maybe_save_changes():
+            event.accept()
+        else:
+            event.ignore()
+
+    def new_project(self) -> bool:
+        """Inicia un nuevo proyecto en blanco tras confirmar cambios pendientes."""
+        if not self.maybe_save_changes():
+            return False
+
+        self._current_image = None
+        self._document = Document()
+        self.canvas.clear_image()
+        self.tool.selection.clear()
+        self.tool.selection_changed.emit()
+        self.undo_stack.clear()
+        self.ripper_panel.set_source_image(None)
+        self._update_window_title()
+        self._update_actions()
+        self._refresh_status()
+        self.statusBar().showMessage(self.tr("Nuevo proyecto iniciado"), 3000)
+        return True
+
+    # ----------------------------------------------------------- carga de imagen
     def open_image_dialog(self) -> None:
+        if not self.maybe_save_changes():
+            return
+
         start_dir = str(self._last_directory) if self._last_directory else ""
         filter_text = self.tr("Imágenes ({patterns});;Todos los archivos (*)").format(
             patterns=open_dialog_filter()
@@ -192,13 +371,160 @@ class MainWindow(QMainWindow):
 
         self._current_image = loaded
         self._last_directory = path.parent
+        self._document = Document(
+            project_name=path.name,
+            source=SourceImageInfo(file_path=str(path)),
+        )
+        self.undo_stack.clear()
+
         self.canvas.set_image(qimage)
         self.ripper_panel.set_source_image(loaded)
-        self.setWindowTitle(f"{path.name} — {APP_TITLE}")
+        self._update_window_title()
         self._update_actions()
         self._refresh_status()
         self.statusBar().showMessage(self.tr("Imagen abierta: {name}").format(name=path.name), 4000)
         return True
+
+    # ------------------------------------------------------- gestión de proyectos
+    def open_project_dialog(self) -> None:
+        if not self.maybe_save_changes():
+            return
+
+        start_dir = str(self._last_directory) if self._last_directory else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, self.tr("Abrir proyecto"), start_dir, PROJECT_FILE_FILTER
+        )
+        if path:
+            self.open_project(Path(path))
+
+    def open_project(self, path: Path) -> bool:
+        """Abre un proyecto .ivtex y restaura todo el estado de trabajo."""
+        QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            doc, image_bytes = load_project(path)
+            if image_bytes is None:
+                raise CorruptProjectError("El archivo no contiene datos de imagen válidos.")
+
+            loaded = load_image_from_bytes(
+                image_bytes,
+                virtual_path=doc.source.asset_filename or path.name,
+            )
+            qimage = rgba_array_to_qimage(loaded.pixels)
+        except (
+            CorruptProjectError,
+            ZipSlipSecurityError,
+            UnsupportedVersionError,
+            MissingSourceImageError,
+            ProjectIOError,
+            ImageLoadError,
+        ) as exc:
+            QGuiApplication.restoreOverrideCursor()
+            logger.warning("Error al abrir proyecto %s: %s", path.name, exc)
+            self._show_error(self.tr("Error al abrir proyecto"), str(exc))
+            return False
+        except Exception as exc:
+            QGuiApplication.restoreOverrideCursor()
+            logger.exception("Error inesperado al abrir proyecto %s: %s", path.name, exc)
+            self._show_error(self.tr("Error inesperado"), str(exc))
+            return False
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+
+        self._document = doc
+        self._current_image = loaded
+        self._last_directory = path.parent
+        self.undo_stack.clear()
+
+        # Restaurar vista e imagen
+        self.canvas.set_image(qimage)
+        self.ripper_panel.set_source_image(loaded)
+
+        # Restaurar parámetros de Texture Ripper
+        self.ripper_panel.set_dimensions(
+            doc.texture_ripper.output_width, doc.texture_ripper.output_height
+        )
+        self.ripper_panel.set_lock_aspect_ratio(doc.texture_ripper.lock_aspect_ratio)
+        self.ripper_panel.set_interpolation_mode(doc.texture_ripper.interpolation)
+
+        if doc.texture_ripper.quad is not None:
+            self.tool.set_quad(doc.texture_ripper.quad)
+        else:
+            self.tool.clear()
+
+        self._update_window_title()
+        self._update_actions()
+        self._refresh_status()
+        self.statusBar().showMessage(
+            self.tr("Proyecto cargado: {name}").format(name=path.name), 4000
+        )
+        return True
+
+    def save_project_dialog(self) -> bool:
+        if self._document.file_path is not None:
+            return self.save_project(self._document.file_path)
+        return self.save_project_as_dialog()
+
+    def save_project_as_dialog(self) -> bool:
+        start_dir = str(self._last_directory) if self._last_directory else ""
+        suggested = f"{self._document.project_name}.ivtex"
+        default_target = Path(start_dir) / suggested if start_dir else Path(suggested)
+
+        chosen, _ = QFileDialog.getSaveFileName(
+            self,
+            self.tr("Guardar proyecto como"),
+            str(default_target),
+            PROJECT_FILE_FILTER,
+        )
+        if not chosen:
+            return False
+
+        target = Path(chosen)
+        if target.suffix.lower() != ".ivtex":
+            target = target.with_suffix(".ivtex")
+
+        return self.save_project(target)
+
+    def _get_current_image_bytes(self) -> bytes | None:
+        if self._current_image is None:
+            return None
+        if self._current_image.path.is_file():
+            try:
+                return self._current_image.path.read_bytes()
+            except OSError:
+                pass
+        # Generar PNG en memoria desde el arreglo RGBA
+        bio = BytesIO()
+        im = Image.fromarray(self._current_image.pixels, mode="RGBA")
+        im.save(bio, format="PNG")
+        return bio.getvalue()
+
+    def save_project(self, path: Path) -> bool:
+        """Guarda el proyecto actual en ``path`` de forma atómica."""
+        if not self.canvas.has_image:
+            return False
+
+        # Sincronizar estado actual del UI en el documento
+        self._document.texture_ripper.quad = self.tool.selection.get_quad()
+        self._document.texture_ripper.output_width = self.ripper_panel.output_width
+        self._document.texture_ripper.output_height = self.ripper_panel.output_height
+        self._document.texture_ripper.lock_aspect_ratio = self.ripper_panel.lock_aspect_ratio
+        self._document.texture_ripper.interpolation = self.ripper_panel.interpolation_mode
+
+        img_bytes = self._get_current_image_bytes()
+
+        try:
+            save_project(path, self._document, image_bytes=img_bytes, embed_image=True)
+            self._last_directory = path.parent
+            self.undo_stack.setClean()
+            self._update_window_title()
+            self.statusBar().showMessage(
+                self.tr("Proyecto guardado: {name}").format(name=path.name), 4000
+            )
+            return True
+        except ProjectIOError as exc:
+            logger.exception("Error al guardar proyecto en %s: %s", path.name, exc)
+            self._show_error(self.tr("Error al guardar el proyecto"), str(exc))
+            return False
 
     def _show_error(self, title: str, message: str) -> None:
         QMessageBox.warning(self, title, message)
@@ -207,6 +533,10 @@ class MainWindow(QMainWindow):
     @property
     def current_image(self) -> LoadedImage | None:
         return self._current_image
+
+    @property
+    def document(self) -> Document:
+        return self._document
 
     def _refresh_status(self) -> None:
         image = self._current_image

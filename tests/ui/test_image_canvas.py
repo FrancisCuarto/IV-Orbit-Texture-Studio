@@ -155,3 +155,52 @@ def test_canvas_wheel_zoom(qtbot):
     )
     canvas.wheelEvent(wheel_event)
     assert canvas.mapper.zoom > old_zoom
+
+
+def test_canvas_left_click_pan(qtbot):
+    canvas = ImageCanvas()
+    qtbot.addWidget(canvas)
+    canvas.resize(400, 400)
+    canvas.show()
+
+    img = _make_test_qimage(100, 100)
+    canvas.set_image(img)
+    initial_offset = canvas.mapper.offset
+
+    # Left-click on canvas
+    p1 = QPointF(250.0, 250.0)
+    press_event = QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        p1,
+        p1,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    canvas.mousePressEvent(press_event)
+
+    # Drag left-click by dx=-30, dy=40
+    p2 = QPointF(220.0, 290.0)
+    move_event = QMouseEvent(
+        QMouseEvent.Type.MouseMove,
+        p2,
+        p2,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    canvas.mouseMoveEvent(move_event)
+
+    # Release
+    release_event = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        p2,
+        p2,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    canvas.mouseReleaseEvent(release_event)
+
+    assert canvas.mapper.offset.x == initial_offset.x - 30.0
+    assert canvas.mapper.offset.y == initial_offset.y + 40.0

@@ -80,11 +80,18 @@ class TextureRipperPanel(QWidget):
         self._btn_reset_rect.setToolTip(self.tr("Ajusta un cuadrilátero inicial centrado"))
         self._btn_reset_rect.clicked.connect(self._tool.reset_to_default)
 
+        self._btn_corners = QPushButton(self.tr("Ajustar a esquinas"))
+        self._btn_corners.setToolTip(
+            self.tr("Ajusta los 4 vértices exactamente a las 4 esquinas de la imagen")
+        )
+        self._btn_corners.clicked.connect(self._tool.select_image_corners)
+
         self._btn_clear = QPushButton(self.tr("Limpiar"))
         self._btn_clear.setToolTip(self.tr("Borra la selección para marcar 4 puntos manualmente"))
         self._btn_clear.clicked.connect(self._tool.clear)
 
         h_btn_sel.addWidget(self._btn_reset_rect)
+        h_btn_sel.addWidget(self._btn_corners)
         h_btn_sel.addWidget(self._btn_clear)
         v_sel.addLayout(h_btn_sel)
         layout.addWidget(group_sel)
@@ -309,6 +316,38 @@ class TextureRipperPanel(QWidget):
 
     def _show_error(self, title: str, message: str) -> None:
         QMessageBox.critical(self, title, message)
+
+    @property
+    def output_width(self) -> int:
+        return self._spin_width.value()
+
+    @property
+    def output_height(self) -> int:
+        return self._spin_height.value()
+
+    def set_dimensions(self, width: int, height: int) -> None:
+        self._updating_dimensions = True
+        self._spin_width.setValue(width)
+        self._spin_height.setValue(height)
+        self._updating_dimensions = False
+        self._update_preview()
+
+    @property
+    def lock_aspect_ratio(self) -> bool:
+        return self._chk_lock_aspect.isChecked()
+
+    def set_lock_aspect_ratio(self, lock: bool) -> None:
+        self._chk_lock_aspect.setChecked(lock)
+
+    @property
+    def interpolation_mode(self) -> InterpolationMode:
+        return InterpolationMode(self._combo_interp.currentData())
+
+    def set_interpolation_mode(self, mode: InterpolationMode) -> None:
+        for idx in range(self._combo_interp.count()):
+            if self._combo_interp.itemData(idx) == mode:
+                self._combo_interp.setCurrentIndex(idx)
+                break
 
     def export_texture(self) -> None:
         if self._source_image is None or not self._tool.selection.is_valid():
