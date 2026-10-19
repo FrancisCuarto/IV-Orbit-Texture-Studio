@@ -107,3 +107,54 @@ class ChangeInterpolationCommand(QUndoCommand):
 
     def redo(self) -> None:
         self.apply_fn(self.new_mode)
+
+
+ATLAS_MERGE_COMMAND_ID = 4242
+
+
+class AtlasEditCommand(QUndoCommand):
+    """Comando reversible basado en instantáneas del estado completo del Atlas.
+
+    El cambio ya fue aplicado al crearse el comando, por lo que el primer ``redo()``
+    (invocado automáticamente por ``QUndoStack.push``) no hace nada. Las ediciones
+    consecutivas con la misma ``merge_key`` (p. ej. desplazar con flechas la misma
+    textura) se fusionan en una sola entrada del historial.
+    """
+
+    def __init__(
+        self,
+        before: object,
+        after: object,
+        apply_fn: Callable[[object], None],
+        text: str = "Editar atlas",
+        merge_key: str | None = None,
+        parent: QUndoCommand | None = None,
+    ) -> None:
+        super().__init__(text, parent)
+        self.before = before
+        self.after = after
+        self.apply_fn = apply_fn
+        self.merge_key = merge_key
+        self._skip_first_redo = True
+
+    def id(self) -> int:
+        return ATLAS_MERGE_COMMAND_ID if self.merge_key else -1
+
+    def mergeWith(self, other: QUndoCommand) -> bool:  # noqa: N802 (API de Qt)
+        if (
+            isinstance(other, AtlasEditCommand)
+            and self.merge_key is not None
+            and other.merge_key == self.merge_key
+        ):
+            self.after = other.after
+            return True
+        return False
+
+    def undo(self) -> None:
+        self.apply_fn(self.before)
+
+    def redo(self) -> None:
+        if self._skip_first_redo:
+            self._skip_first_redo = False
+            return
+        self.apply_fn(self.after)

@@ -394,7 +394,13 @@ def composite_atlas_items(
         )
         packed_sprites.append(ps)
 
-        frames_dict[item.name] = {
+        frame_name = item.name
+        suffix = 2
+        while frame_name in frames_dict:
+            frame_name = f"{item.name}_{suffix}"
+            suffix += 1
+
+        frames_dict[frame_name] = {
             "frame": {
                 "x": item.x,
                 "y": item.y,

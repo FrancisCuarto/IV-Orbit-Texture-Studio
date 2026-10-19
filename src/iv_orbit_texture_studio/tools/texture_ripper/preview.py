@@ -46,6 +46,7 @@ class TextureRipperPanel(QWidget):
 
     export_requested = Signal(Path)
     add_to_atlas_requested = Signal(object, str)
+    open_atlas_requested = Signal()
 
     def __init__(
         self,
@@ -177,6 +178,14 @@ class TextureRipperPanel(QWidget):
         self._btn_add_to_atlas.clicked.connect(self.add_to_atlas)
         layout.addWidget(self._btn_add_to_atlas)
 
+        self._btn_open_atlas = QPushButton(self.tr("🧩 Ver / Acomodar Atlas (0)"))
+        self._btn_open_atlas.setToolTip(
+            self.tr("Ir al Compositor de Atlas para acomodar las texturas extraídas")
+        )
+        self._btn_open_atlas.setEnabled(False)
+        self._btn_open_atlas.clicked.connect(self.open_atlas_requested.emit)
+        layout.addWidget(self._btn_open_atlas)
+
         self._btn_export = QPushButton(self.tr("Exportar textura individual…"))
         self._btn_export.setStyleSheet(
             "QPushButton { font-weight: bold; padding: 8px; "
@@ -189,6 +198,11 @@ class TextureRipperPanel(QWidget):
 
         layout.addStretch(1)
         self._update_ui_state()
+
+    def set_atlas_item_count(self, count: int) -> None:
+        """Actualiza el contador de texturas en el botón de acceso directo al Atlas."""
+        self._btn_open_atlas.setText(self.tr("🧩 Ver / Acomodar Atlas ({n})").format(n=count))
+        self._btn_open_atlas.setEnabled(count > 0)
 
     # ------------------------------------------------------------- estado e imagen
     def set_source_image(self, loaded_image: LoadedImage | None) -> None:

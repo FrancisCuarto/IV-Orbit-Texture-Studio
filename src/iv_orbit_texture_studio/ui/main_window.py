@@ -13,9 +13,12 @@ from PySide6.QtGui import (
     QAction,
     QActionGroup,
     QCloseEvent,
+    QDragEnterEvent,
+    QDropEvent,
     QGuiApplication,
     QImage,
     QKeySequence,
+    QUndoGroup,
     QUndoStack,
 )
 from PySide6.QtWidgets import (
@@ -28,7 +31,11 @@ from PySide6.QtWidgets import (
 )
 
 from iv_orbit_texture_studio.core.atlas_item import AtlasItem
-from iv_orbit_texture_studio.core.commands import MoveVertexCommand, SetQuadCommand
+from iv_orbit_texture_studio.core.commands import (
+    AtlasEditCommand,
+    MoveVertexCommand,
+    SetQuadCommand,
+)
 from iv_orbit_texture_studio.core.document import (
     Document,
     PbrSettings,
@@ -77,11 +84,18 @@ class MainWindow(QMainWindow):
         self._last_directory: Path | None = None
         self._document: Document = Document()
         self.undo_stack: QUndoStack = QUndoStack(self)
+        # Historial propio del atlas: sobrevive al pegar/abrir nuevas capturas.
+        self.atlas_undo_stack: QUndoStack = QUndoStack(self)
+        self.undo_group: QUndoGroup = QUndoGroup(self)
+        self.undo_group.addStack(self.undo_stack)
+        self.undo_group.addStack(self.atlas_undo_stack)
+        self.undo_group.setActiveStack(self.undo_stack)
         self.prompt_on_close: bool = "PYTEST_CURRENT_TEST" not in os.environ
         self._clipboard_count: int = 0
 
         self.setWindowTitle(APP_TITLE)
         self.resize(1200, 800)
+        self.setAcceptDrops(True)
 
         self.canvas = ImageCanvas(self)
         self.setCentralWidget(self.canvas)
@@ -235,10 +249,10 @@ class MainWindow(QMainWindow):
         self.action_pack_atlas.triggered.connect(self.sprite_panel.generate_atlas)
 
         # Edición / Historial
-        self.action_undo = self.undo_stack.createUndoAction(self, self.tr("&Deshacer"))
+        self.action_undo = self.undo_group.createUndoAction(self, self.tr("&Deshacer"))
         self.action_undo.setShortcut(QKeySequence.StandardKey.Undo)
 
-        self.action_redo = self.undo_stack.createRedoAction(self, self.tr("&Rehacer"))
+        self.action_redo = self.undo_group.createRedoAction(self, self.tr("&Rehacer"))
         self.action_redo.setShortcut(QKeySequence.StandardKey.Redo)
 
         self.action_corners = QAction(self.tr("Ajustar selección a las &esquinas"), self)
@@ -421,7 +435,15 @@ class MainWindow(QMainWindow):
             self.action_mode_pbr.setChecked(True)
             self._update_pbr_canvas_image()
 
+        self._sync_active_undo_stack()
         self._update_actions()
+        self._refresh_status()
+
+    def _sync_active_undo_stack(self) -> None:
+        if self._current_mode == "sprites" and self.sprite_tool.submode == "atlas":
+            self.undo_group.setActiveStack(self.atlas_undo_stack)
+        else:
+            self.undo_group.setActiveStack(self.undo_stack)
 
     def _update_prep_canvas_image(self) -> None:
         if self._current_mode != "prep":
@@ -464,12 +486,15 @@ class MainWindow(QMainWindow):
         self.tool.vertex_drag_finished.connect(self._on_vertex_drag_finished)
         self.tool.quad_changed_by_user.connect(self._on_quad_changed_by_user)
         self.undo_stack.cleanChanged.connect(self._on_clean_changed)
+        self.atlas_undo_stack.cleanChanged.connect(self._on_clean_changed)
         self.ripper_panel.export_requested.connect(self._on_export_finished)
         self.ripper_panel.add_to_atlas_requested.connect(self._on_add_ripped_to_atlas)
+        self.ripper_panel.open_atlas_requested.connect(lambda: self.set_mode("sprites"))
         self.sprite_tool.sprites_changed.connect(self._on_sprites_changed)
         self.sprite_panel.atlas_exported.connect(self._on_atlas_exported)
         self.sprite_panel.submode_changed.connect(self._on_sprite_submode_changed)
         self.atlas_tool.atlas_changed.connect(self._on_atlas_changed)
+        self.atlas_tool.edit_committed.connect(self._on_atlas_edit_committed)
         self.prep_tool.texture_updated.connect(self._on_prep_texture_updated)
         self.prep_panel.prep_modified.connect(self._on_prep_modified)
         self.prep_panel.texture_exported.connect(self._on_prep_texture_exported)
@@ -506,25 +531,50 @@ class MainWindow(QMainWindow):
             self.tr(
                 "➕ Textura '{name}' añadida al Atlas ({count} en total). "
                 "Cambiá a Modo Sprites y Atlas para acomodarla."
-            ).format(name=name, count=len(self.atlas_tool.items)),
+            ).format(name=item.name, count=len(self.atlas_tool.items)),
             6000,
         )
 
     def _on_sprite_submode_changed(self, submode: str) -> None:
+        self._sync_active_undo_stack()
         if self._current_mode == "sprites":
             if submode == "atlas":
                 self.canvas.set_image(
-                    rgba_array_to_qimage(self.atlas_tool.composite_pixels), keep_view=True
+                    rgba_array_to_qimage(self.atlas_tool.composite_pixels), keep_view=False
                 )
             elif self._original_qimage is not None:
-                self.canvas.set_image(self._original_qimage, keep_view=True)
+                self.canvas.set_image(self._original_qimage, keep_view=False)
+            self._refresh_status()
 
     def _on_atlas_changed(self) -> None:
+        count = len(self.atlas_tool.items)
+        self.ripper_panel.set_atlas_item_count(count)
         if self._current_mode == "sprites" and self.sprite_tool.submode == "atlas":
+            keep = self.canvas.has_image
             self.canvas.set_image(
-                rgba_array_to_qimage(self.atlas_tool.composite_pixels), keep_view=True
+                rgba_array_to_qimage(self.atlas_tool.composite_pixels), keep_view=keep
             )
+            self._refresh_status()
         self._update_actions()
+
+    def _on_atlas_edit_committed(
+        self, before: object, after: object, text: str, merge_key: object
+    ) -> None:
+        def apply_snap(snap: object) -> None:
+            self.atlas_tool.restore(snap)
+            self._document.atlas_items = list(self.atlas_tool.items)
+
+        cmd = AtlasEditCommand(
+            before,
+            after,
+            apply_snap,
+            text=text,
+            merge_key=str(merge_key) if isinstance(merge_key, str) else None,
+        )
+        self.atlas_undo_stack.push(cmd)
+        self._document.atlas_items = list(self.atlas_tool.items)
+        self._document.touch_modified()
+        self._update_window_title()
 
     def _on_sprites_changed(self) -> None:
         self._update_actions()
@@ -604,9 +654,16 @@ class MainWindow(QMainWindow):
         for action in self._view_actions:
             action.setEnabled(has_image or has_atlas)
 
+    def _is_dirty(self) -> bool:
+        return (
+            not self.undo_stack.isClean()
+            or not self.atlas_undo_stack.isClean()
+            or self._document.is_modified
+        )
+
     def _update_window_title(self) -> None:
         proj_name = self._document.project_name
-        dirty = "*" if (not self.undo_stack.isClean() or self._document.is_modified) else ""
+        dirty = "*" if self._is_dirty() else ""
         self.setWindowTitle(f"{proj_name}{dirty} — {APP_TITLE}")
 
     def _on_clean_changed(self, is_clean: bool) -> None:
@@ -639,9 +696,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------- ciclo de vida
     def maybe_save_changes(self) -> bool:
         """Verifica si hay cambios pendientes y solicita confirmación al usuario."""
-        if not self.prompt_on_close or not self.canvas.has_image:
+        if not self.prompt_on_close or (not self.canvas.has_image and not self.atlas_tool.items):
             return True
-        if self.undo_stack.isClean() and not self._document.is_modified:
+        if not self._is_dirty():
             return True
 
         reply = QMessageBox.question(
@@ -680,6 +737,7 @@ class MainWindow(QMainWindow):
         self.sprite_tool.clear()
         self.atlas_tool.clear()
         self.undo_stack.clear()
+        self.atlas_undo_stack.clear()
         self.ripper_panel.set_source_image(None)
         self.sprite_panel.set_source_image(None)
         self.prep_panel.set_source_image(None)
@@ -880,6 +938,7 @@ class MainWindow(QMainWindow):
         self.sprite_tool.set_sprites(list(doc.sprites))
         self.sprite_panel.set_atlas_settings(doc.atlas)
         self.atlas_tool.set_items(list(doc.atlas_items))
+        self.atlas_undo_stack.clear()
 
         # Restaurar preparación y mosaico
         self.prep_panel.set_settings(doc.texture_prep)
@@ -968,6 +1027,7 @@ class MainWindow(QMainWindow):
             save_project(path, self._document, image_bytes=img_bytes, embed_image=True)
             self._last_directory = path.parent
             self.undo_stack.setClean()
+            self.atlas_undo_stack.setClean()
             self._document.mark_clean(path)
             self._update_window_title()
             self.statusBar().showMessage(
@@ -981,6 +1041,62 @@ class MainWindow(QMainWindow):
 
     def _show_error(self, title: str, message: str) -> None:
         QMessageBox.warning(self, title, message)
+
+    # ---------------------------------------------------- arrastrar y soltar (D&D)
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802 (API de Qt)
+        mime = event.mimeData()
+        if mime.hasUrls() or mime.hasImage():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802 (API de Qt)
+        mime = event.mimeData()
+        if mime.hasImage():
+            qimg = mime.imageData()
+            if isinstance(qimg, QImage) and not qimg.isNull():
+                QGuiApplication.clipboard().setImage(qimg)
+                self.paste_from_clipboard()
+                event.acceptProposedAction()
+                return
+
+        if not mime.hasUrls():
+            event.ignore()
+            return
+
+        local_paths = [Path(u.toLocalFile()) for u in mime.urls() if u.isLocalFile()]
+        local_paths = [p for p in local_paths if p.is_file()]
+        if not local_paths:
+            event.ignore()
+            return
+
+        # 1. Si se suelta un proyecto .ivtex, abrirlo
+        for p in local_paths:
+            if p.suffix.lower() == ".ivtex":
+                if self.maybe_save_changes():
+                    self.open_project(p)
+                event.acceptProposedAction()
+                return
+
+        # 2. Si estamos en el Compositor de Atlas o se sueltan múltiples imágenes -> añadir al Atlas
+        in_atlas_compositor = (
+            self._current_mode == "sprites" and self.sprite_tool.submode == "atlas"
+        )
+        if in_atlas_compositor or len(local_paths) > 1:
+            added = self.sprite_panel.add_image_files_to_atlas(local_paths)
+            if added > 0:
+                self.set_mode("sprites")
+                self.statusBar().showMessage(
+                    self.tr("Se añadieron {n} imagen(es) al Atlas.").format(n=added),
+                    5000,
+                )
+            event.acceptProposedAction()
+            return
+
+        # 3. Una sola imagen en otro modo -> abrirla en Texture Ripper
+        if self.maybe_save_changes():
+            self.open_image(local_paths[0])
+        event.acceptProposedAction()
 
     # -------------------------------------------------------------- estado
     @property
@@ -996,6 +1112,19 @@ class MainWindow(QMainWindow):
         return self._document
 
     def _refresh_status(self) -> None:
+        if (
+            self._current_mode == "sprites"
+            and self.sprite_tool.submode == "atlas"
+            and len(self.atlas_tool.items) > 0
+        ):
+            n = len(self.atlas_tool.items)
+            self._label_file.setText(self.tr("Atlas ({n} texturas)").format(n=n))
+            self._label_size.setText(
+                f"{self.atlas_tool.atlas_width} × {self.atlas_tool.atlas_height} px"
+            )
+            self._on_view_changed(self.canvas.mapper.zoom)
+            return
+
         image = self._current_image
         if image is None:
             self._label_file.setText(self.tr("Sin imagen"))

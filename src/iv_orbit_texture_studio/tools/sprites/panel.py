@@ -8,8 +8,8 @@ de múltiples texturas en un Atlas unificado.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QPixmap
@@ -46,13 +46,16 @@ from iv_orbit_texture_studio.imaging.atlas import (
     composite_atlas_items,
     pack_sprites_to_atlas,
 )
+from iv_orbit_texture_studio.imaging.image_io import (
+    ImageLoadError,
+    LoadedImage,
+    load_image,
+    open_dialog_filter,
+)
 from iv_orbit_texture_studio.imaging.sprites import extract_sprite_pixels
 from iv_orbit_texture_studio.tools.sprites.tool import SpriteTool
 from iv_orbit_texture_studio.ui.canvas.coordinate_mapper import Size
 from iv_orbit_texture_studio.ui.qt_image import rgba_array_to_qimage
-
-if TYPE_CHECKING:
-    from iv_orbit_texture_studio.imaging.image_io import LoadedImage
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +140,12 @@ class SpritePanel(QWidget):
         v_items.addWidget(self._table_atlas)
 
         h_btn_items = QHBoxLayout()
+        self._btn_add_files_atlas = QPushButton(self.tr("📂 Añadir…"))
+        self._btn_add_files_atlas.setToolTip(
+            self.tr("Importar una o varias imágenes desde disco directamente al atlas")
+        )
+        self._btn_add_files_atlas.clicked.connect(self.add_files_to_atlas_dialog)
+
         self._btn_remove_atlas = QPushButton(self.tr("Eliminar"))
         self._btn_remove_atlas.setToolTip(self.tr("Eliminar la textura seleccionada del atlas"))
         self._btn_remove_atlas.clicked.connect(self._remove_selected_atlas_item)
@@ -145,6 +154,7 @@ class SpritePanel(QWidget):
         self._btn_clear_atlas.setToolTip(self.tr("Quitar todas las texturas del atlas"))
         self._btn_clear_atlas.clicked.connect(self._tool.atlas_tool.clear)
 
+        h_btn_items.addWidget(self._btn_add_files_atlas)
         h_btn_items.addWidget(self._btn_remove_atlas)
         h_btn_items.addWidget(self._btn_clear_atlas)
         v_items.addLayout(h_btn_items)
@@ -171,6 +181,46 @@ class SpritePanel(QWidget):
         h_pos.addWidget(self._spin_atlas_y)
         form_item_props.addRow(self.tr("Posición px:"), h_pos)
         v_items.addLayout(form_item_props)
+
+        h_transform = QHBoxLayout()
+        self._btn_atlas_duplicate = QPushButton(self.tr("Duplicar"))
+        self._btn_atlas_duplicate.setToolTip(self.tr("Duplicar la textura seleccionada (Ctrl+D)"))
+        self._btn_atlas_duplicate.clicked.connect(self._tool.atlas_tool.duplicate_selected)
+        self._btn_atlas_rotate = QPushButton(self.tr("⟳ 90°"))
+        self._btn_atlas_rotate.setToolTip(
+            self.tr("Rotar 90° en sentido horario (R; Shift+R antihorario)")
+        )
+        self._btn_atlas_rotate.clicked.connect(
+            lambda: self._tool.atlas_tool.rotate_selected(clockwise=True)
+        )
+        self._btn_atlas_flip_h = QPushButton(self.tr("⇋"))
+        self._btn_atlas_flip_h.setToolTip(self.tr("Voltear horizontalmente (H)"))
+        self._btn_atlas_flip_h.clicked.connect(
+            lambda: self._tool.atlas_tool.flip_selected(horizontal=True)
+        )
+        self._btn_atlas_flip_v = QPushButton(self.tr("⇅"))
+        self._btn_atlas_flip_v.setToolTip(self.tr("Voltear verticalmente (V)"))
+        self._btn_atlas_flip_v.clicked.connect(
+            lambda: self._tool.atlas_tool.flip_selected(horizontal=False)
+        )
+        for btn in (
+            self._btn_atlas_duplicate,
+            self._btn_atlas_rotate,
+            self._btn_atlas_flip_h,
+            self._btn_atlas_flip_v,
+        ):
+            h_transform.addWidget(btn)
+        v_items.addLayout(h_transform)
+
+        label_hint = QLabel(
+            self.tr(
+                "Arrastrá con el ratón (Alt: sin imán) · Flechas: mover 1 px "
+                "(Shift: 10 px) · Supr: eliminar · Ctrl+Z: deshacer"
+            )
+        )
+        label_hint.setWordWrap(True)
+        label_hint.setStyleSheet("color: #888888; font-size: 10px;")
+        v_items.addWidget(label_hint)
         layout_atlas.addWidget(group_items)
 
         # 2. Grupo: Dimensiones y Empaquetado
@@ -237,6 +287,17 @@ class SpritePanel(QWidget):
         )
         self._btn_atlas_autopack.clicked.connect(self.auto_pack_atlas)
         v_dims.addWidget(self._btn_atlas_autopack)
+
+        self._btn_atlas_fit = QPushButton(self.tr("📐 Ajustar lienzo al contenido"))
+        self._btn_atlas_fit.setToolTip(
+            self.tr("Recorta/amplía el lienzo para abarcar justo las texturas (sin moverlas)")
+        )
+        self._btn_atlas_fit.clicked.connect(
+            lambda: self._tool.atlas_tool.fit_canvas_to_content(
+                power_of_two=self._chk_compose_pot.isChecked()
+            )
+        )
+        v_dims.addWidget(self._btn_atlas_fit)
 
         self._label_atlas_stats_composed = QLabel("—")
         self._label_atlas_stats_composed.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -480,23 +541,33 @@ class SpritePanel(QWidget):
 
     # ---------------------------------------------------- eventos Compositor Atlas
     def _update_atlas_ui_state(self) -> None:
-        items = self._tool.atlas_tool.items
+        atlas = self._tool.atlas_tool
+        items = atlas.items
         has_items = len(items) > 0
-        has_selected = self._tool.atlas_tool.selected_id is not None
+        has_selected = atlas.selected_id is not None
         has_source = self._source_image is not None and len(self._tool.sprites) > 0
 
         self._btn_clear_atlas.setEnabled(has_items)
         self._btn_atlas_autopack.setEnabled(has_items)
+        self._btn_atlas_fit.setEnabled(has_items)
         self._btn_export_composed_atlas.setEnabled(has_items)
         self._btn_remove_atlas.setEnabled(has_selected)
         self._edit_atlas_name.setEnabled(has_selected)
         self._spin_atlas_x.setEnabled(has_selected)
         self._spin_atlas_y.setEnabled(has_selected)
+        for btn in (
+            self._btn_atlas_duplicate,
+            self._btn_atlas_rotate,
+            self._btn_atlas_flip_h,
+            self._btn_atlas_flip_v,
+        ):
+            btn.setEnabled(has_selected)
         self._btn_import_sheet_sprites.setEnabled(has_source)
 
-        selected = self._tool.atlas_tool.selected_item
+        selected = atlas.selected_item
         if selected is not None:
-            self._edit_atlas_name.setText(selected.name)
+            if not self._edit_atlas_name.hasFocus():
+                self._edit_atlas_name.setText(selected.name)
             self._updating_atlas_pos = True
             self._spin_atlas_x.setValue(selected.x)
             self._spin_atlas_y.setValue(selected.y)
@@ -505,27 +576,29 @@ class SpritePanel(QWidget):
             self._edit_atlas_name.clear()
 
         # Actualizar etiqueta de estadísticas
-        w = self._tool.atlas_tool.atlas_width
-        h = self._tool.atlas_tool.atlas_height
+        w = atlas.atlas_width
+        h = atlas.atlas_height
         count = len(items)
         plural = "s" if count != 1 else ""
-        overlap_count = 0
-        for i in range(len(items)):
-            for j in range(i + 1, len(items)):
-                if items[i].rect.intersects(items[j].rect):
-                    overlap_count += 1
+        overlap_count = len(atlas.overlapping_ids())
+        oob_count = len(atlas.out_of_bounds_ids())
 
-        if overlap_count > 0:
-            status_text = (
-                f"{w} × {h} px  |  {count} textura{plural}  |  ⚠️ {overlap_count} solapamiento(s)"
-            )
+        used_area = sum(it.width * it.height for it in items)
+        occupancy = (used_area / float(w * h) * 100.0) if w * h > 0 else 0.0
+        parts = [f"{w} × {h} px", f"{count} textura{plural}", f"{occupancy:.0f}% ocupado"]
+
+        if overlap_count > 0 or oob_count > 0:
+            if overlap_count > 0:
+                parts.append(f"⚠️ {overlap_count} solapada(s)")
+            if oob_count > 0:
+                parts.append(f"⚠️ {oob_count} fuera del lienzo")
             self._label_atlas_stats_composed.setStyleSheet(
                 "color: #ff5555; font-size: 11px; font-weight: bold;"
             )
         else:
-            status_text = f"{w} × {h} px  |  {count} textura{plural}  |  ✓ Sin solapamientos"
+            parts.append("✓ Sin solapamientos")
             self._label_atlas_stats_composed.setStyleSheet("color: #aaaaaa; font-size: 11px;")
-        self._label_atlas_stats_composed.setText(status_text)
+        self._label_atlas_stats_composed.setText("  |  ".join(parts))
 
     def _on_atlas_changed(self) -> None:
         self._refresh_atlas_table()
@@ -534,11 +607,15 @@ class SpritePanel(QWidget):
     def _on_atlas_item_selected(self, item_id: str) -> None:
         self._update_atlas_ui_state()
         if not self._updating_atlas_table:
+            self._updating_atlas_table = True
+            if not item_id:
+                self._table_atlas.clearSelection()
             for row in range(self._table_atlas.rowCount()):
                 it = self._table_atlas.item(row, 0)
                 if it and it.data(Qt.ItemDataRole.UserRole) == item_id:
                     self._table_atlas.selectRow(row)
                     break
+            self._updating_atlas_table = False
 
     def _on_atlas_item_moved(self, item_id: str, new_x: int, new_y: int) -> None:
         if not self._updating_atlas_pos and self._tool.atlas_tool.selected_id == item_id:
@@ -549,13 +626,26 @@ class SpritePanel(QWidget):
 
     def _refresh_atlas_table(self) -> None:
         self._updating_atlas_table = True
-        items = self._tool.atlas_tool.items
+        atlas = self._tool.atlas_tool
+        items = atlas.items
+        overlapping = atlas.overlapping_ids()
+        oob = atlas.out_of_bounds_ids()
         self._table_atlas.setRowCount(len(items))
 
         for row, it in enumerate(items):
             item_name = QTableWidgetItem(it.name)
             item_name.setData(Qt.ItemDataRole.UserRole, it.id)
-            item_pos = QTableWidgetItem(f"{it.x}, {it.y}")
+            warn = ""
+            tooltip = ""
+            if it.id in overlapping:
+                warn = "⚠ "
+                tooltip = self.tr("Se solapa con otra textura")
+            elif it.id in oob:
+                warn = "⚠ "
+                tooltip = self.tr("Queda fuera del lienzo: se recortará al exportar")
+            item_pos = QTableWidgetItem(f"{warn}{it.x}, {it.y}")
+            if tooltip:
+                item_pos.setToolTip(tooltip)
             item_size = QTableWidgetItem(f"{it.width} × {it.height}")
 
             item_pos.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -565,9 +655,11 @@ class SpritePanel(QWidget):
             self._table_atlas.setItem(row, 1, item_pos)
             self._table_atlas.setItem(row, 2, item_size)
 
-            if it.id == self._tool.atlas_tool.selected_id:
+            if it.id == atlas.selected_id:
                 self._table_atlas.selectRow(row)
 
+        if atlas.selected_id is None:
+            self._table_atlas.clearSelection()
         self._updating_atlas_table = False
 
     def _on_atlas_table_selection_changed(self) -> None:
@@ -586,27 +678,58 @@ class SpritePanel(QWidget):
         if sel_id is not None:
             self._tool.atlas_tool.remove_item(sel_id)
 
+    def add_files_to_atlas_dialog(self) -> None:
+        """Abre un diálogo para seleccionar una o varias imágenes y añadirlas al Atlas."""
+        start_dir = str(self._source_image.path.parent) if self._source_image is not None else ""
+        filter_text = self.tr("Imágenes ({patterns});;Todos los archivos (*)").format(
+            patterns=open_dialog_filter()
+        )
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            self.tr("Añadir imágenes al Atlas"),
+            start_dir,
+            filter_text,
+        )
+        if paths:
+            self.add_image_files_to_atlas([Path(p) for p in paths])
+
+    def add_image_files_to_atlas(self, paths: Sequence[Path]) -> int:
+        """Carga las imágenes indicadas y las incorpora como piezas al Atlas."""
+        added = 0
+        for p in paths:
+            try:
+                loaded = load_image(p)
+                item = AtlasItem.create(name=p.stem, pixels=loaded.pixels)
+                self._tool.atlas_tool.add_item(item)
+                added += 1
+            except ImageLoadError as exc:
+                logger.warning("No se pudo añadir %s al atlas: %s", p.name, exc)
+                QMessageBox.warning(
+                    self,
+                    self.tr("Error al cargar imagen"),
+                    self.tr("No se pudo abrir '{name}': {err}").format(name=p.name, err=exc),
+                )
+        return added
+
     def _on_atlas_name_edited(self) -> None:
         selected = self._tool.atlas_tool.selected_item
         if selected is not None:
             new_name = self._edit_atlas_name.text().strip()
             if new_name and new_name != selected.name:
-                selected.name = new_name
-                self._tool.atlas_tool.rebuild_composite()
-                self._tool.atlas_tool.atlas_changed.emit()
+                final = self._tool.atlas_tool.rename_item(selected.id, new_name)
+                if final is not None:
+                    self._edit_atlas_name.setText(final)
+            elif not new_name:
+                self._edit_atlas_name.setText(selected.name)
 
     def _on_atlas_pos_edited(self) -> None:
         if self._updating_atlas_pos:
             return
         selected = self._tool.atlas_tool.selected_item
         if selected is not None:
-            nx = self._spin_atlas_x.value()
-            ny = self._spin_atlas_y.value()
-            if selected.x != nx or selected.y != ny:
-                selected.x = nx
-                selected.y = ny
-                self._tool.atlas_tool.rebuild_composite()
-                self._tool.atlas_tool.atlas_changed.emit()
+            self._tool.atlas_tool.set_item_position(
+                selected.id, self._spin_atlas_x.value(), self._spin_atlas_y.value()
+            )
 
     def _on_atlas_dims_combo_changed(self, index: int) -> None:
         data = self._combo_atlas_dims.itemData(index)
@@ -634,12 +757,15 @@ class SpritePanel(QWidget):
 
     def auto_pack_atlas(self) -> None:
         """Acomoda automáticamente todas las texturas usando MaxRects."""
-        self._tool.atlas_tool.auto_pack(
-            padding=self._spin_compose_padding.value(),
-            spacing=self._spin_compose_spacing.value(),
-            power_of_two=self._chk_compose_pot.isChecked(),
-            square=self._chk_compose_square.isChecked(),
-        )
+        try:
+            self._tool.atlas_tool.auto_pack(
+                padding=self._spin_compose_padding.value(),
+                spacing=self._spin_compose_spacing.value(),
+                power_of_two=self._chk_compose_pot.isChecked(),
+                square=self._chk_compose_square.isChecked(),
+            )
+        except AtlasFitError as exc:
+            QMessageBox.warning(self, self.tr("No caben las texturas"), str(exc))
 
     def import_detected_sprites_to_atlas(self) -> None:
         """Importa todos los sprites actualmente detectados de la imagen como AtlasItems."""
@@ -658,15 +784,43 @@ class SpritePanel(QWidget):
             self.tr("Se importaron {count} sprites al Compositor de Atlas.").format(count=count),
         )
 
+    def _confirm_export_with_issues(self, overlap_count: int, oob_count: int) -> bool:
+        """Pide confirmación si el atlas tiene problemas. Separado para poder simularlo en tests."""
+        lines = []
+        if overlap_count:
+            lines.append(self.tr("• {n} textura(s) se solapan.").format(n=overlap_count))
+        if oob_count:
+            lines.append(
+                self.tr("• {n} textura(s) quedan fuera del lienzo y se recortarán.").format(
+                    n=oob_count
+                )
+            )
+        reply = QMessageBox.question(
+            self,
+            self.tr("El atlas tiene advertencias"),
+            "\n".join(lines) + "\n\n" + self.tr("¿Exportar de todas formas?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
     def export_composed_atlas(self) -> None:
         """Exporta el atlas interactivo compuesto y sus metadatos JSON a disco."""
-        items = self._tool.atlas_tool.items
+        atlas = self._tool.atlas_tool
+        items = atlas.items
         if not items:
             QMessageBox.warning(
                 self,
                 self.tr("Atlas vacío"),
                 self.tr("No hay texturas en el atlas para exportar."),
             )
+            return
+
+        overlap_count = len(atlas.overlapping_ids())
+        oob_count = len(atlas.out_of_bounds_ids())
+        if (overlap_count or oob_count) and not self._confirm_export_with_issues(
+            overlap_count, oob_count
+        ):
             return
 
         default_name = "atlas.png"
@@ -691,8 +845,8 @@ class SpritePanel(QWidget):
         try:
             result = composite_atlas_items(
                 items,
-                self._tool.atlas_tool.atlas_width,
-                self._tool.atlas_tool.atlas_height,
+                atlas.atlas_width,
+                atlas.atlas_height,
                 atlas_image_name=img_target.name,
             )
             out_img, out_json = export_atlas_and_metadata(result, img_target, overwrite=True)

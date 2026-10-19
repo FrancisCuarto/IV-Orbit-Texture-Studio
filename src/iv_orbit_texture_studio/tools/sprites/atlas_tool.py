@@ -2,12 +2,26 @@
 
 Permite visualizar el lienzo del atlas final, seleccionar texturas individuales y arrastrarlas
 libremente con el ratón para ubicarlas en cualquier posición (X, Y), con soporte de ajuste
-magnético (snapping), detección visual de solapamientos y auto-empaquetado inteligente.
+magnético (snapping) con guías visuales, detección de solapamientos, auto-empaquetado,
+transformaciones (rotar / voltear / duplicar) y un historial de Deshacer/Rehacer basado en
+instantáneas.
+
+Atajos de teclado (con el lienzo enfocado, en el Compositor de Atlas):
+
+* Flechas: mover 1 px (con ``Shift``: 10 px).
+* ``Ctrl+D``: duplicar la textura seleccionada.
+* ``R`` / ``Shift+R``: rotar 90° horario / antihorario.
+* ``H`` / ``V``: voltear horizontal / vertical.
+* ``Supr`` / ``Retroceso``: eliminar.  ``Esc``: deseleccionar.
+* Mantener ``Alt`` mientras se arrastra desactiva el ajuste magnético.
 """
 
 from __future__ import annotations
 
 import logging
+import re
+import uuid
+from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
@@ -15,7 +29,7 @@ from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QKeyEvent, QMouseEvent, QPainter, QPen
 
 from iv_orbit_texture_studio.core.atlas_item import AtlasItem
-from iv_orbit_texture_studio.core.region import Rect
+from iv_orbit_texture_studio.core.region import Pivot, Rect
 from iv_orbit_texture_studio.imaging.atlas import auto_pack_atlas_items, composite_atlas_items
 from iv_orbit_texture_studio.ui.canvas.coordinate_mapper import CoordinateMapper, Point
 
@@ -26,10 +40,65 @@ COLOR_SELECTION = QColor(0, 210, 255, 240)
 COLOR_SELECTION_FILL = QColor(0, 210, 255, 25)
 COLOR_HOVER = QColor(255, 215, 0, 180)
 COLOR_OVERLAP = QColor(255, 60, 60, 220)
+COLOR_OUT_OF_BOUNDS = QColor(255, 140, 0, 230)
 COLOR_ATLAS_BORDER = QColor(100, 150, 240, 200)
+COLOR_GUIDE = QColor(255, 0, 200, 220)
 COLOR_BADGE_BG = QColor(20, 24, 32, 220)
 COLOR_BADGE_TXT = QColor(255, 255, 255, 240)
 SNAP_THRESHOLD_PX = 8.0
+"""Distancia de ajuste magnético, en píxeles de *pantalla* (independiente del zoom)."""
+
+MAX_ATLAS_DIM = 16384
+MIN_ATLAS_DIM = 32
+
+
+@dataclass(frozen=True, slots=True)
+class _ItemState:
+    id: str
+    name: str
+    pixels: RgbaArray
+    x: int
+    y: int
+    pivot: Pivot
+
+
+@dataclass(frozen=True, slots=True)
+class AtlasSnapshot:
+    """Instantánea inmutable del estado completo del atlas (para Deshacer/Rehacer).
+
+    Los arreglos de píxeles se comparten por referencia: la herramienta nunca los modifica
+    in situ (rotar/voltear generan arreglos nuevos), por lo que las instantáneas son baratas.
+    """
+
+    items: tuple[_ItemState, ...]
+    width: int
+    height: int
+    selected_id: str | None
+
+    def same_content(self, other: AtlasSnapshot) -> bool:
+        """Compara el contenido relevante (ignora la selección)."""
+        if self.width != other.width or self.height != other.height:
+            return False
+        if len(self.items) != len(other.items):
+            return False
+        for a, b in zip(self.items, other.items, strict=True):
+            if (
+                a.id != b.id
+                or a.name != b.name
+                or a.x != b.x
+                or a.y != b.y
+                or a.pivot != b.pivot
+                or a.pixels is not b.pixels
+            ):
+                return False
+        return True
+
+
+def _next_pot(value: int) -> int:
+    p = 1
+    while p < value:
+        p <<= 1
+    return p
 
 
 class AtlasTool(QObject):
@@ -38,6 +107,7 @@ class AtlasTool(QObject):
     atlas_changed = Signal()
     item_selected = Signal(str)  # item_id o ""
     item_moved = Signal(str, int, int)  # item_id, nuevo x, nuevo y
+    edit_committed = Signal(object, object, str, object)  # before, after, texto, merge_key
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -52,8 +122,11 @@ class AtlasTool(QObject):
 
         # Estado de interacción de arrastre
         self._is_dragging: bool = False
+        self._drag_moved: bool = False
+        self._drag_before: AtlasSnapshot | None = None
         self._drag_start_item_pos: tuple[int, int] = (0, 0)
         self._drag_start_mouse_pos: tuple[float, float] = (0.0, 0.0)
+        self._guides: list[tuple[str, int]] = []  # ("v", x) / ("h", y)
 
     # ------------------------------------------------------------- propiedades
     @property
@@ -76,10 +149,7 @@ class AtlasTool(QObject):
     def selected_item(self) -> AtlasItem | None:
         if self._selected_id is None:
             return None
-        for item in self._items:
-            if item.id == self._selected_id:
-                return item
-        return None
+        return self._find(self._selected_id)
 
     @property
     def composite_pixels(self) -> RgbaArray:
@@ -88,62 +158,183 @@ class AtlasTool(QObject):
         assert self._composite_cache is not None
         return self._composite_cache
 
+    @property
+    def is_dragging(self) -> bool:
+        return self._is_dragging
+
+    def _find(self, item_id: str) -> AtlasItem | None:
+        for item in self._items:
+            if item.id == item_id:
+                return item
+        return None
+
+    # --------------------------------------------------------- análisis/estado
+    def overlapping_ids(self) -> set[str]:
+        """IDs de las texturas que se solapan con al menos otra."""
+        result: set[str] = set()
+        for i in range(len(self._items)):
+            ri = self._items[i].rect
+            for j in range(i + 1, len(self._items)):
+                if ri.intersects(self._items[j].rect):
+                    result.add(self._items[i].id)
+                    result.add(self._items[j].id)
+        return result
+
+    def out_of_bounds_ids(self) -> set[str]:
+        """IDs de las texturas que quedan (total o parcialmente) fuera del lienzo."""
+        return {
+            it.id
+            for it in self._items
+            if it.x < 0
+            or it.y < 0
+            or it.x + it.width > self._atlas_width
+            or it.y + it.height > self._atlas_height
+        }
+
+    def unique_name(self, base: str, exclude_id: str | None = None) -> str:
+        """Devuelve ``base`` o ``base_2``, ``base_3``… si ya existe otra textura con ese nombre."""
+        base = base.strip() or "textura"
+        taken = {it.name for it in self._items if it.id != exclude_id}
+        if base not in taken:
+            return base
+        stem = re.sub(r"_\d+$", "", base) or base
+        n = 2
+        while f"{stem}_{n}" in taken:
+            n += 1
+        return f"{stem}_{n}"
+
+    # ------------------------------------------------------------- historial
+    def snapshot(self) -> AtlasSnapshot:
+        return AtlasSnapshot(
+            items=tuple(
+                _ItemState(it.id, it.name, it.pixels, it.x, it.y, it.pivot) for it in self._items
+            ),
+            width=self._atlas_width,
+            height=self._atlas_height,
+            selected_id=self._selected_id,
+        )
+
+    def restore(self, snap: object) -> None:
+        """Restaura una instantánea (usado por Deshacer/Rehacer)."""
+        assert isinstance(snap, AtlasSnapshot)
+        self._is_dragging = False
+        self._guides = []
+        self._items = [
+            AtlasItem(id=s.id, name=s.name, pixels=s.pixels, x=s.x, y=s.y, pivot=s.pivot)
+            for s in snap.items
+        ]
+        self._atlas_width = snap.width
+        self._atlas_height = snap.height
+        sel = snap.selected_id
+        if sel is not None and self._find(sel) is None:
+            sel = None
+        self._selected_id = sel
+        self._hovered_id = None
+        self.rebuild_composite()
+        self.item_selected.emit(sel or "")
+        self.atlas_changed.emit()
+
+    def _commit(self, before: AtlasSnapshot, text: str, merge_key: str | None = None) -> None:
+        after = self.snapshot()
+        if not before.same_content(after):
+            self.edit_committed.emit(before, after, text, merge_key)
+
     # ----------------------------------------------------------------- gestión
     def set_atlas_dimensions(self, width: int, height: int) -> None:
         """Establece las dimensiones del lienzo del atlas."""
-        w = max(32, min(width, 16384))
-        h = max(32, min(height, 16384))
+        w = max(MIN_ATLAS_DIM, min(width, MAX_ATLAS_DIM))
+        h = max(MIN_ATLAS_DIM, min(height, MAX_ATLAS_DIM))
         if self._atlas_width != w or self._atlas_height != h:
+            before = self.snapshot()
             self._atlas_width = w
             self._atlas_height = h
             self.rebuild_composite()
             self.atlas_changed.emit()
+            self._commit(before, f"Cambiar lienzo a {w}×{h}")
 
     def set_items(self, items: list[AtlasItem]) -> None:
-        """Reemplaza la lista completa de texturas del atlas."""
+        """Reemplaza la lista completa de texturas del atlas (no se registra en el historial)."""
         self._items = list(items)
-        if self._selected_id is not None and not any(
-            it.id == self._selected_id for it in self._items
-        ):
+        if self._selected_id is not None and self._find(self._selected_id) is None:
             self._selected_id = self._items[0].id if self._items else None
             self.item_selected.emit(self._selected_id or "")
         self.rebuild_composite()
         self.atlas_changed.emit()
 
+    def find_free_position(self, width: int, height: int, spacing: int = 2) -> tuple[int, int]:
+        """Busca la posición libre más arriba/izquierda donde quepa un rectángulo ``w×h``.
+
+        Usa como candidatos las esquinas derechas e inferiores de las texturas existentes
+        (heurística *bottom-left*). Si no cabe en el lienzo actual devuelve una posición
+        debajo de todo el contenido (el lienzo se ampliará después).
+        """
+        if not self._items:
+            return (0, 0)
+        rects = [it.rect for it in self._items]
+        candidates: set[tuple[int, int]] = {(0, 0)}
+        for r in rects:
+            candidates.add((r.right + spacing, r.y))
+            candidates.add((r.x, r.bottom + spacing))
+            candidates.add((0, r.bottom + spacing))
+            candidates.add((r.right + spacing, 0))
+
+        def free(cx: int, cy: int) -> bool:
+            cand = Rect(cx, cy, width + spacing, height + spacing)
+            return not any(cand.intersects(r) for r in rects)
+
+        for cx, cy in sorted(candidates, key=lambda p: (p[1], p[0])):
+            if cx < 0 or cy < 0:
+                continue
+            if cx + width > self._atlas_width or cy + height > self._atlas_height:
+                continue
+            if free(cx, cy):
+                return (cx, cy)
+
+        # No cabe: debajo de todo
+        bottom = max(r.bottom for r in rects)
+        return (0, bottom + spacing)
+
     def add_item(self, item: AtlasItem, auto_place: bool = True) -> None:
-        """Añade una textura al atlas."""
+        """Añade una textura al atlas, ubicándola en un hueco libre y ampliando el lienzo."""
+        before = self.snapshot()
+        item.name = self.unique_name(item.name)
         if auto_place:
-            # Buscar una ubicación donde no solape inmediatamente si es posible
-            placed_rects = [it.rect for it in self._items]
-            cur_x, cur_y = 4, 4
-            candidate = Rect(cur_x, cur_y, item.width, item.height)
-            while any(candidate.intersects(r) for r in placed_rects):
-                cur_x += 16
-                if cur_x + item.width > self._atlas_width:
-                    cur_x = 4
-                    cur_y += 16
-                if cur_y + item.height > self._atlas_height:
-                    break
-                candidate = Rect(cur_x, cur_y, item.width, item.height)
-            item.x = cur_x
-            item.y = cur_y
+            item.x, item.y = self.find_free_position(item.width, item.height)
+            self._grow_to_fit_with(item)
 
         self._items.append(item)
         self._selected_id = item.id
         self.rebuild_composite()
         self.item_selected.emit(item.id)
         self.atlas_changed.emit()
+        self._commit(before, f"Añadir '{item.name}' al atlas")
+
+    def _grow_to_fit_with(self, item: AtlasItem) -> None:
+        need_w = item.x + item.width
+        need_h = item.y + item.height
+        if need_w > self._atlas_width:
+            self._atlas_width = min(MAX_ATLAS_DIM, _next_pot(need_w))
+        if need_h > self._atlas_height:
+            self._atlas_height = min(MAX_ATLAS_DIM, _next_pot(need_h))
 
     def remove_item(self, item_id: str) -> None:
         """Elimina una textura del atlas por su ID."""
-        initial_len = len(self._items)
-        self._items = [it for it in self._items if it.id != item_id]
-        if len(self._items) != initial_len:
-            if self._selected_id == item_id:
-                self._selected_id = self._items[0].id if self._items else None
-                self.item_selected.emit(self._selected_id or "")
-            self.rebuild_composite()
-            self.atlas_changed.emit()
+        before = self.snapshot()
+        idx = next((i for i, it in enumerate(self._items) if it.id == item_id), None)
+        if idx is None:
+            return
+        removed = self._items.pop(idx)
+        if self._selected_id == item_id:
+            if self._items:
+                self._selected_id = self._items[min(idx, len(self._items) - 1)].id
+            else:
+                self._selected_id = None
+            self.item_selected.emit(self._selected_id or "")
+        if self._hovered_id == item_id:
+            self._hovered_id = None
+        self.rebuild_composite()
+        self.atlas_changed.emit()
+        self._commit(before, f"Eliminar '{removed.name}'")
 
     def select_item(self, item_id: str | None) -> None:
         """Selecciona una textura por su ID."""
@@ -154,12 +345,109 @@ class AtlasTool(QObject):
 
     def clear(self) -> None:
         """Borra todas las texturas del atlas."""
+        before = self.snapshot()
         self._items.clear()
         self._selected_id = None
         self._hovered_id = None
         self.rebuild_composite()
         self.item_selected.emit("")
         self.atlas_changed.emit()
+        self._commit(before, "Vaciar atlas")
+
+    def rename_item(self, item_id: str, new_name: str) -> str | None:
+        """Renombra una textura garantizando nombres únicos. Devuelve el nombre final."""
+        item = self._find(item_id)
+        if item is None or not new_name.strip():
+            return None
+        final = self.unique_name(new_name.strip(), exclude_id=item_id)
+        if final != item.name:
+            before = self.snapshot()
+            item.name = final
+            self.atlas_changed.emit()
+            self._commit(before, f"Renombrar a '{final}'")
+        return final
+
+    def set_item_position(self, item_id: str, x: int, y: int) -> None:
+        """Mueve una textura a ``(x, y)`` (ediciones consecutivas se fusionan en el historial)."""
+        item = self._find(item_id)
+        if item is None or (item.x == x and item.y == y):
+            return
+        before = self.snapshot()
+        item.x, item.y = x, y
+        self.rebuild_composite()
+        self.item_moved.emit(item.id, x, y)
+        self.atlas_changed.emit()
+        self._commit(before, f"Mover '{item.name}'", merge_key=f"move:{item.id}")
+
+    def nudge_selected(self, dx: int, dy: int) -> bool:
+        item = self.selected_item
+        if item is None:
+            return False
+        self.set_item_position(item.id, item.x + dx, item.y + dy)
+        return True
+
+    def duplicate_selected(self) -> AtlasItem | None:
+        """Duplica la textura seleccionada y la ubica en un hueco libre."""
+        src = self.selected_item
+        if src is None:
+            return None
+        dup = AtlasItem(
+            id=uuid.uuid4().hex[:12],
+            name=src.name,
+            pixels=src.pixels,
+            x=src.x,
+            y=src.y,
+            pivot=src.pivot,
+        )
+        self.add_item(dup, auto_place=True)
+        return dup
+
+    def _transform_selected(self, fn_name: str, text: str) -> bool:
+        item = self.selected_item
+        if item is None:
+            return False
+        before = self.snapshot()
+        px = item.pixels
+        if fn_name == "rot_cw":
+            new = np.rot90(px, k=-1)
+        elif fn_name == "rot_ccw":
+            new = np.rot90(px, k=1)
+        elif fn_name == "flip_h":
+            new = px[:, ::-1]
+        else:
+            new = px[::-1, :]
+        new = np.ascontiguousarray(new)
+        new.setflags(write=False)
+        # Rotar alrededor del centro para que no "salte" visualmente
+        cx = item.x + item.width / 2.0
+        cy = item.y + item.height / 2.0
+        item.pixels = new
+        item.x = int(round(cx - item.width / 2.0))
+        item.y = int(round(cy - item.height / 2.0))
+        self.rebuild_composite()
+        self.atlas_changed.emit()
+        self._commit(before, f"{text} '{item.name}'")
+        return True
+
+    def rotate_selected(self, clockwise: bool = True) -> bool:
+        if clockwise:
+            return self._transform_selected("rot_cw", "Rotar 90° horario")
+        return self._transform_selected("rot_ccw", "Rotar 90° antihorario")
+
+    def flip_selected(self, horizontal: bool = True) -> bool:
+        if horizontal:
+            return self._transform_selected("flip_h", "Voltear horizontal")
+        return self._transform_selected("flip_v", "Voltear vertical")
+
+    def fit_canvas_to_content(self, power_of_two: bool = True) -> None:
+        """Ajusta el lienzo al contenido actual (sin mover texturas)."""
+        if not self._items:
+            return
+        need_w = max(MIN_ATLAS_DIM, max(it.x + it.width for it in self._items))
+        need_h = max(MIN_ATLAS_DIM, max(it.y + it.height for it in self._items))
+        if power_of_two:
+            need_w, need_h = _next_pot(need_w), _next_pot(need_h)
+        self.set_atlas_dimensions(need_w, need_h)
 
     def auto_pack(
         self,
@@ -171,12 +459,13 @@ class AtlasTool(QObject):
         """Acomoda automáticamente todas las texturas usando MaxRects con cero solapamientos."""
         if not self._items:
             return
+        before = self.snapshot()
         result = auto_pack_atlas_items(
             self._items,
             padding=padding,
             spacing=spacing,
-            max_width=self._atlas_width,
-            max_height=self._atlas_height,
+            max_width=MAX_ATLAS_DIM,
+            max_height=MAX_ATLAS_DIM,
             power_of_two=power_of_two,
             square=square,
         )
@@ -184,13 +473,13 @@ class AtlasTool(QObject):
         self._atlas_height = result.height
         self.rebuild_composite()
         self.atlas_changed.emit()
+        self._commit(before, "Auto-empaquetar atlas")
 
     def rebuild_composite(self) -> None:
         """Reconstruye el mapa composite RGBA con las posiciones actuales."""
         result = composite_atlas_items(self._items, self._atlas_width, self._atlas_height)
         self._composite_cache = result.image
 
-    # ---------------------------------------------------------- eventos de ratón
     # ---------------------------------------------------------- eventos de ratón
     def _hit_test(self, px: float, py: float) -> AtlasItem | None:
         """Busca el item en (px, py) de arriba a abajo (orden inverso de lista)."""
@@ -210,6 +499,8 @@ class AtlasTool(QObject):
         if hit is not None:
             self._selected_id = hit.id
             self._is_dragging = True
+            self._drag_moved = False
+            self._drag_before = self.snapshot()
             self._drag_start_item_pos = (hit.x, hit.y)
             self._drag_start_mouse_pos = (img_pt.x, img_pt.y)
             self.item_selected.emit(hit.id)
@@ -227,6 +518,58 @@ class AtlasTool(QObject):
         """Alias retrocompatible."""
         return self.handle_mouse_press(event, mapper)
 
+    def _snap(self, item: AtlasItem, new_x: int, new_y: int, threshold: float) -> tuple[int, int]:
+        """Ajuste magnético a bordes del lienzo y de otras texturas; registra guías."""
+        self._guides = []
+        w, h = item.width, item.height
+
+        best_dx: tuple[float, int, int] | None = None  # (dist, x, guía)
+        best_dy: tuple[float, int, int] | None = None
+
+        def consider_x(target_x: int, guide: int) -> None:
+            nonlocal best_dx
+            d = abs(new_x - target_x)
+            if d <= threshold and (best_dx is None or d < best_dx[0]):
+                best_dx = (d, target_x, guide)
+
+        def consider_y(target_y: int, guide: int) -> None:
+            nonlocal best_dy
+            d = abs(new_y - target_y)
+            if d <= threshold and (best_dy is None or d < best_dy[0]):
+                best_dy = (d, target_y, guide)
+
+        # Bordes del lienzo
+        consider_x(0, 0)
+        consider_x(self._atlas_width - w, self._atlas_width)
+        consider_y(0, 0)
+        consider_y(self._atlas_height - h, self._atlas_height)
+
+        for other in self._items:
+            if other.id == item.id:
+                continue
+            o = other.rect
+            # Solo consideramos vecinos cercanos en el eje perpendicular
+            near_v = new_y < o.bottom + threshold and new_y + h > o.y - threshold
+            near_h = new_x < o.right + threshold and new_x + w > o.x - threshold
+            if near_v:
+                consider_x(o.right, o.right)  # izquierda ↔ derecha del otro
+                consider_x(o.x - w, o.x)  # derecha ↔ izquierda del otro
+                consider_x(o.x, o.x)  # alinear izquierdas
+                consider_x(o.right - w, o.right)  # alinear derechas
+            if near_h:
+                consider_y(o.bottom, o.bottom)
+                consider_y(o.y - h, o.y)
+                consider_y(o.y, o.y)
+                consider_y(o.bottom - h, o.bottom)
+
+        if best_dx is not None:
+            new_x = best_dx[1]
+            self._guides.append(("v", best_dx[2]))
+        if best_dy is not None:
+            new_y = best_dy[1]
+            self._guides.append(("h", best_dy[2]))
+        return new_x, new_y
+
     def handle_mouse_move(self, event: QMouseEvent, mapper: CoordinateMapper) -> bool:
         pos = event.position()
         img_pt = mapper.screen_to_image(Point(pos.x(), pos.y()))
@@ -242,35 +585,18 @@ class AtlasTool(QObject):
             new_x = int(round(self._drag_start_item_pos[0] + dx))
             new_y = int(round(self._drag_start_item_pos[1] + dy))
 
-            # Snapping magnético a los bordes del atlas (0 y atlas_dim - item_dim)
-            if abs(new_x) <= SNAP_THRESHOLD_PX:
-                new_x = 0
-            elif abs(new_x + item.width - self._atlas_width) <= SNAP_THRESHOLD_PX:
-                new_x = self._atlas_width - item.width
-
-            if abs(new_y) <= SNAP_THRESHOLD_PX:
-                new_y = 0
-            elif abs(new_y + item.height - self._atlas_height) <= SNAP_THRESHOLD_PX:
-                new_y = self._atlas_height - item.height
-
-            # Snapping magnético respecto a otras texturas cercanas
-            for other in self._items:
-                if other.id == item.id:
-                    continue
-                # Alinear lado izquierdo con lado derecho de otro
-                if abs(new_x - other.rect.right) <= SNAP_THRESHOLD_PX:
-                    new_x = other.rect.right
-                # Alinear lado derecho con lado izquierdo de otro
-                elif abs(new_x + item.width - other.x) <= SNAP_THRESHOLD_PX:
-                    new_x = other.x - item.width
-                # Alinear lado superior con inferior de otro
-                if abs(new_y - other.rect.bottom) <= SNAP_THRESHOLD_PX:
-                    new_y = other.rect.bottom
-                # Alinear lado inferior con superior de otro
-                elif abs(new_y + item.height - other.y) <= SNAP_THRESHOLD_PX:
-                    new_y = other.y - item.height
+            if event.modifiers() & Qt.KeyboardModifier.AltModifier:
+                self._guides = []
+            else:
+                zoom = mapper.zoom if mapper.zoom > 0 else 1.0
+                new_x, new_y = self._snap(item, new_x, new_y, SNAP_THRESHOLD_PX / zoom)
 
             if item.x != new_x or item.y != new_y:
+                if not self._drag_moved:
+                    # Al empezar a arrastrar, traer la textura al frente
+                    self._drag_moved = True
+                    self._items.remove(item)
+                    self._items.append(item)
                 item.x = new_x
                 item.y = new_y
                 self.rebuild_composite()
@@ -294,6 +620,12 @@ class AtlasTool(QObject):
     def handle_mouse_release(self, event: QMouseEvent, mapper: CoordinateMapper) -> bool:
         if self._is_dragging:
             self._is_dragging = False
+            self._guides = []
+            before = self._drag_before
+            self._drag_before = None
+            item = self.selected_item
+            if before is not None and self._drag_moved and item is not None:
+                self._commit(before, f"Mover '{item.name}'")
             self.atlas_changed.emit()
             return True
         return False
@@ -303,12 +635,41 @@ class AtlasTool(QObject):
         return self.handle_mouse_release(event, mapper)
 
     def handle_key_press(self, event: QKeyEvent) -> bool:
-        if (
-            event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace)
-            and self._selected_id is not None
-        ):
+        key = event.key()
+        mods = event.modifiers()
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self._selected_id is not None:
             self.remove_item(self._selected_id)
             return True
+
+        if key == Qt.Key.Key_Escape and self._selected_id is not None:
+            self.select_item(None)
+            return True
+
+        step = 10 if shift else 1
+        arrows = {
+            Qt.Key.Key_Left: (-step, 0),
+            Qt.Key.Key_Right: (step, 0),
+            Qt.Key.Key_Up: (0, -step),
+            Qt.Key.Key_Down: (0, step),
+        }
+        if key in arrows and not ctrl:
+            ddx, ddy = arrows[Qt.Key(key)]
+            return self.nudge_selected(ddx, ddy)
+
+        if ctrl and key == Qt.Key.Key_D:
+            return self.duplicate_selected() is not None
+        if ctrl:
+            return False
+
+        if key == Qt.Key.Key_R:
+            return self.rotate_selected(clockwise=not shift)
+        if key == Qt.Key.Key_H:
+            return self.flip_selected(horizontal=True)
+        if key == Qt.Key.Key_V:
+            return self.flip_selected(horizontal=False)
         return False
 
     def key_press(self, event: QKeyEvent) -> bool:
@@ -323,52 +684,60 @@ class AtlasTool(QObject):
         return None
 
     # ------------------------------------------------------------- renderizado
+    @staticmethod
+    def _screen_rect(mapper: CoordinateMapper, rect: Rect) -> QRectF:
+        tl = mapper.image_to_screen(Point(float(rect.x), float(rect.y)))
+        br = mapper.image_to_screen(Point(float(rect.right), float(rect.bottom)))
+        return QRectF(tl.x, tl.y, br.x - tl.x, br.y - tl.y)
+
     def paint_overlay(self, painter: QPainter, mapper: CoordinateMapper) -> None:
-        """Dibuja bordes del atlas, contornos de selección y etiquetas."""
+        """Dibuja bordes del atlas, contornos de selección, guías y etiquetas."""
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
         # 1. Borde del límite del Atlas
-        tl = mapper.image_to_screen(Point(0.0, 0.0))
-        br = mapper.image_to_screen(Point(float(self._atlas_width), float(self._atlas_height)))
-        atlas_rect = QRectF(tl.x, tl.y, br.x - tl.x, br.y - tl.y)
-
-        pen_border = QPen(COLOR_ATLAS_BORDER, 1.5, Qt.PenStyle.DashLine)
-        painter.setPen(pen_border)
+        atlas_rect = self._screen_rect(mapper, Rect(0, 0, self._atlas_width, self._atlas_height))
+        painter.setPen(QPen(COLOR_ATLAS_BORDER, 1.5, Qt.PenStyle.DashLine))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(atlas_rect)
 
-        # 2. Resaltar solapamientos entre elementos en rojo
-        for i in range(len(self._items)):
-            for j in range(i + 1, len(self._items)):
-                it1 = self._items[i]
-                it2 = self._items[j]
-                if it1.rect.intersects(it2.rect):
-                    # Dibujar advertencia en los dos rectángulos
-                    for it in (it1, it2):
-                        itl = mapper.image_to_screen(Point(float(it.x), float(it.y)))
-                        ibr = mapper.image_to_screen(
-                            Point(float(it.rect.right), float(it.rect.bottom))
-                        )
-                        pen_ov = QPen(COLOR_OVERLAP, 1.5, Qt.PenStyle.DotLine)
-                        painter.setPen(pen_ov)
-                        painter.drawRect(QRectF(itl.x, itl.y, ibr.x - itl.x, ibr.y - itl.y))
+        # 2. Contorno sutil de todas las texturas + hover
+        for it in self._items:
+            if it.id == self._hovered_id and it.id != self._selected_id:
+                painter.setPen(QPen(COLOR_HOVER, 1.5))
+                painter.drawRect(self._screen_rect(mapper, it.rect))
 
-        # 3. Dibujar rectángulo de selección activa
+        # 3. Solapamientos (rojo) y fuera de límites (naranja)
+        overlapping = self.overlapping_ids()
+        oob = self.out_of_bounds_ids()
+        for it in self._items:
+            if it.id in overlapping:
+                painter.setPen(QPen(COLOR_OVERLAP, 1.5, Qt.PenStyle.DotLine))
+                painter.drawRect(self._screen_rect(mapper, it.rect))
+            elif it.id in oob:
+                painter.setPen(QPen(COLOR_OUT_OF_BOUNDS, 1.5, Qt.PenStyle.DashDotLine))
+                painter.drawRect(self._screen_rect(mapper, it.rect))
+
+        # 4. Guías de ajuste magnético
+        if self._guides:
+            painter.setPen(QPen(COLOR_GUIDE, 1.0, Qt.PenStyle.DashLine))
+            vp = painter.viewport()
+            for kind, value in self._guides:
+                if kind == "v":
+                    sx = mapper.image_to_screen(Point(float(value), 0.0)).x
+                    painter.drawLine(QPointF(sx, 0.0), QPointF(sx, float(vp.height())))
+                else:
+                    sy = mapper.image_to_screen(Point(0.0, float(value))).y
+                    painter.drawLine(QPointF(0.0, sy), QPointF(float(vp.width()), sy))
+
+        # 5. Rectángulo de selección activa
         selected = self.selected_item
         if selected is not None:
-            stl = mapper.image_to_screen(Point(float(selected.x), float(selected.y)))
-            sbr = mapper.image_to_screen(
-                Point(float(selected.rect.right), float(selected.rect.bottom))
-            )
-            sel_rect = QRectF(stl.x, stl.y, sbr.x - stl.x, sbr.y - stl.y)
-
-            pen_sel = QPen(COLOR_SELECTION, 2.0)
-            painter.setPen(pen_sel)
+            sel_rect = self._screen_rect(mapper, selected.rect)
+            painter.setPen(QPen(COLOR_SELECTION, 2.0))
             painter.setBrush(QBrush(COLOR_SELECTION_FILL))
             painter.drawRect(sel_rect)
 
-            # Manijas en las 4 esquinas
             handle_half = 4.0
             painter.setBrush(QBrush(COLOR_SELECTION))
             for hx, hy in [

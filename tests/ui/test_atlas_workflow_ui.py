@@ -277,3 +277,105 @@ def test_atlas_items_project_roundtrip(qtbot, tmp_path, monkeypatch):
     assert it1.height == 48
     assert it1.x == 120
     assert it1.y == 40
+
+
+def test_atlas_undo_redo_and_keyboard_shortcuts(qtbot, monkeypatch):
+    from PySide6.QtGui import QKeyEvent
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+
+    img = _create_mock_qimage(200, 120, QColor(180, 90, 220, 255))
+    monkeypatch.setattr(
+        "PySide6.QtGui.QGuiApplication.clipboard",
+        lambda: type("MockClip", (), {"image": lambda self: img})(),
+    )
+    window.paste_from_clipboard()
+    window.ripper_panel.set_dimensions(100, 60)
+    window.ripper_panel.add_to_atlas()
+
+    # El botón de acceso rápido al Atlas muestra el contador actualizado y abre el compositor
+    assert window.ripper_panel._btn_open_atlas.isEnabled()
+    assert "(1)" in window.ripper_panel._btn_open_atlas.text()
+    window.ripper_panel._btn_open_atlas.click()
+    assert window.action_mode_sprites.isChecked()
+    assert window.sprite_tool.submode == "atlas"
+
+    atlas = window.atlas_tool
+    item = atlas.selected_item
+    assert item is not None
+    orig_x, orig_y = item.x, item.y
+
+    # Mover con flechas (1 px y Shift+Flecha 10 px): se fusionan en un único comando de Undo
+    ev_right = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Right, Qt.KeyboardModifier.NoModifier)
+    ev_down_shift = QKeyEvent(
+        QKeyEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.ShiftModifier
+    )
+    assert window.sprite_tool.handle_key_press(ev_right) is True
+    assert window.sprite_tool.handle_key_press(ev_down_shift) is True
+    assert (item.x, item.y) == (orig_x + 1, orig_y + 10)
+
+    # Deshacer restaura ambos movimientos de una vez (por merge_key)
+    window.action_undo.trigger()
+    item = atlas.selected_item
+    assert item is not None
+    assert (item.x, item.y) == (orig_x, orig_y)
+
+    # Rehacer vuelve a aplicar el movimiento
+    window.action_redo.trigger()
+    item = atlas.selected_item
+    assert item is not None
+    assert (item.x, item.y) == (orig_x + 1, orig_y + 10)
+
+    # Rotar 90° intercambia ancho y alto (100x60 -> 60x100) y es reversible
+    ev_rot = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_R, Qt.KeyboardModifier.NoModifier)
+    assert window.sprite_tool.handle_key_press(ev_rot) is True
+    item = atlas.selected_item
+    assert item is not None
+    assert (item.width, item.height) == (60, 100)
+
+    window.action_undo.trigger()
+    item = atlas.selected_item
+    assert item is not None
+    assert (item.width, item.height) == (100, 60)
+
+    # Duplicar con Ctrl+D crea una segunda pieza sin colisión de nombre ni solapamiento
+    ev_dup = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_D, Qt.KeyboardModifier.ControlModifier)
+    assert window.sprite_tool.handle_key_press(ev_dup) is True
+    assert len(atlas.items) == 2
+    assert atlas.items[0].name != atlas.items[1].name
+    assert len(atlas.overlapping_ids()) == 0
+
+    # Eliminar con Supr y luego deshacer la eliminación
+    ev_del = QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Delete, Qt.KeyboardModifier.NoModifier)
+    assert window.sprite_tool.handle_key_press(ev_del) is True
+    assert len(atlas.items) == 1
+    window.action_undo.trigger()
+    assert len(atlas.items) == 2
+
+
+def test_atlas_unique_names_fit_canvas_and_direct_file_import(qtbot, tmp_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+
+    # Guardar dos archivos PNG en disco e importarlos directamente al Atlas
+    f1 = tmp_path / "brick.png"
+    f2 = tmp_path / "brick_copy.png"
+    _create_mock_qimage(80, 80, QColor(200, 80, 40, 255)).save(str(f1))
+    _create_mock_qimage(120, 60, QColor(40, 160, 200, 255)).save(str(f2))
+
+    added = window.sprite_panel.add_image_files_to_atlas([f1, f2])
+    assert added == 2
+    assert len(window.atlas_tool.items) == 2
+
+    # Intentar renombrar la segunda textura al mismo nombre que la primera genera sufijo único
+    second_id = window.atlas_tool.items[1].id
+    final_name = window.atlas_tool.rename_item(second_id, "brick")
+    assert final_name == "brick_2"
+
+    # Ajustar lienzo al contenido en potencia de dos
+    window.atlas_tool.fit_canvas_to_content(power_of_two=True)
+    assert window.atlas_tool.atlas_width == 256
+    assert window.atlas_tool.atlas_height in (64, 128)
