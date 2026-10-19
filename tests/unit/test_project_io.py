@@ -201,3 +201,38 @@ def test_project_with_texture_prep_settings(tmp_path):
     assert loaded.texture_prep.seamless_blend == 0.30
     assert loaded.texture_prep.tiling_grid_x == 4
     assert loaded.texture_prep.tiling_grid_y == 2
+
+
+def test_project_with_pbr_settings(tmp_path):
+    proj_file = tmp_path / "pbr_proj.ivtex"
+    img_bytes = _make_dummy_image_bytes()
+
+    doc = Document(project_name="Proyecto con Mapas PBR")
+    doc.pbr.normal_strength = 3.5
+    doc.pbr.format_opengl = False  # DirectX
+    doc.pbr.normal_blur = 1
+    doc.pbr.height_contrast = 1.4
+    doc.pbr.height_invert = True
+    doc.pbr.base_roughness = 0.7
+    doc.pbr.roughness_detail = 0.5
+    doc.pbr.roughness_invert = True  # Glossiness
+    doc.pbr.ao_strength = 2.0
+    doc.pbr.ao_radius = 7
+    doc.pbr.metallic = 0.8
+    doc.pbr.packing_format = "RMA"
+
+    save_project(proj_file, doc, image_bytes=img_bytes)
+
+    loaded, _ = load_project(proj_file)
+    assert abs(loaded.pbr.normal_strength - 3.5) < 1e-4
+    assert loaded.pbr.format_opengl is False
+    assert loaded.pbr.normal_blur == 1
+    assert abs(loaded.pbr.height_contrast - 1.4) < 1e-4
+    assert loaded.pbr.height_invert is True
+    assert abs(loaded.pbr.base_roughness - 0.7) < 1e-4
+    assert abs(loaded.pbr.roughness_detail - 0.5) < 1e-4
+    assert loaded.pbr.roughness_invert is True
+    assert abs(loaded.pbr.ao_strength - 2.0) < 1e-4
+    assert loaded.pbr.ao_radius == 7
+    assert abs(loaded.pbr.metallic - 0.8) < 1e-4
+    assert loaded.pbr.packing_format == "RMA"

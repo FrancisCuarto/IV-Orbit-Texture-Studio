@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from iv_orbit_texture_studio.core.commands import MoveVertexCommand, SetQuadCommand
 from iv_orbit_texture_studio.core.document import (
     Document,
+    PbrSettings,
     SourceImageInfo,
     TexturePrepSettings,
 )
@@ -50,6 +51,7 @@ from iv_orbit_texture_studio.project_io import (
     load_project,
     save_project,
 )
+from iv_orbit_texture_studio.tools.pbr import PbrPanel, PbrTool
 from iv_orbit_texture_studio.tools.sprites import SpritePanel, SpriteTool
 from iv_orbit_texture_studio.tools.texture_prep import TexturePrepPanel, TexturePrepTool
 from iv_orbit_texture_studio.tools.texture_ripper.preview import TextureRipperPanel
@@ -121,6 +123,19 @@ class MainWindow(QMainWindow):
         )
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_prep)
         self.tabifyDockWidget(self.dock_sprites, self.dock_prep)
+
+        # Herramienta Mapas PBR y Normales
+        self.pbr_tool = PbrTool(self)
+        self.pbr_panel = PbrPanel(self.pbr_tool, self)
+        self.dock_pbr = QDockWidget(self.tr("Mapas PBR"), self)
+        self.dock_pbr.setObjectName("dock_pbr")
+        self.dock_pbr.setWidget(self.pbr_panel)
+        self.dock_pbr.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_pbr)
+        self.tabifyDockWidget(self.dock_prep, self.dock_pbr)
         self.dock_panel.raise_()
 
         self._create_actions()
@@ -166,6 +181,10 @@ class MainWindow(QMainWindow):
         self.action_export_prep.setShortcut(QKeySequence("Ctrl+Alt+E"))
         self.action_export_prep.triggered.connect(self.prep_panel.export_texture)
 
+        self.action_export_pbr = QAction(self.tr("Exportar &mapas PBR…"), self)
+        self.action_export_pbr.setShortcut(QKeySequence("Ctrl+Alt+P"))
+        self.action_export_pbr.triggered.connect(self.pbr_panel.export_all_maps)
+
         self.action_quit = QAction(self.tr("&Salir"), self)
         self.action_quit.setShortcut(QKeySequence.StandardKey.Quit)
         self.action_quit.triggered.connect(self.close)
@@ -191,6 +210,12 @@ class MainWindow(QMainWindow):
         self.action_mode_prep.setChecked(False)
         self.action_mode_prep.triggered.connect(lambda: self.set_mode("prep"))
         self.mode_group.addAction(self.action_mode_prep)
+
+        self.action_mode_pbr = QAction(self.tr("Modo &Mapas PBR y Normales"), self)
+        self.action_mode_pbr.setCheckable(True)
+        self.action_mode_pbr.setChecked(False)
+        self.action_mode_pbr.triggered.connect(lambda: self.set_mode("pbr"))
+        self.mode_group.addAction(self.action_mode_pbr)
 
         # Operaciones de sprites
         self.action_detect_sprites = QAction(self.tr("&Detectar sprites automáticamente"), self)
@@ -257,6 +282,7 @@ class MainWindow(QMainWindow):
         menu_file.addAction(self.action_export)
         menu_file.addAction(self.action_export_atlas)
         menu_file.addAction(self.action_export_prep)
+        menu_file.addAction(self.action_export_pbr)
         menu_file.addSeparator()
         menu_file.addAction(self.action_quit)
 
@@ -272,6 +298,7 @@ class MainWindow(QMainWindow):
         menu_tools.addAction(self.action_mode_ripper)
         menu_tools.addAction(self.action_mode_sprites)
         menu_tools.addAction(self.action_mode_prep)
+        menu_tools.addAction(self.action_mode_pbr)
         menu_tools.addSeparator()
         menu_tools.addAction(self.action_detect_sprites)
         menu_tools.addAction(self.action_pack_atlas)
@@ -284,6 +311,7 @@ class MainWindow(QMainWindow):
         menu_window.addAction(self.dock_panel.toggleViewAction())
         menu_window.addAction(self.dock_sprites.toggleViewAction())
         menu_window.addAction(self.dock_prep.toggleViewAction())
+        menu_window.addAction(self.dock_pbr.toggleViewAction())
 
     def _create_toolbar(self) -> None:
         toolbar = self.addToolBar(self.tr("Principal"))
@@ -300,22 +328,28 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.action_export)
         toolbar.addAction(self.action_export_atlas)
         toolbar.addAction(self.action_export_prep)
+        toolbar.addAction(self.action_export_pbr)
         toolbar.addSeparator()
         toolbar.addAction(self.action_mode_ripper)
         toolbar.addAction(self.action_mode_sprites)
         toolbar.addAction(self.action_mode_prep)
+        toolbar.addAction(self.action_mode_pbr)
         toolbar.addSeparator()
         for action in self._view_actions:
             toolbar.addAction(action)
 
     def set_mode(self, mode: str) -> None:
-        """Cambia el modo activo entre Texture Ripper, Sprites y Preparación/Mosaico."""
+        """Cambia el modo activo entre Texture Ripper, Sprites, Preparación y Mapas PBR."""
         prev_mode = self._current_mode
         self._current_mode = mode
 
-        # Si salimos de modo prep y teníamos la imagen procesada en el lienzo,
+        # Si salimos de modo prep o pbr y teníamos la imagen procesada en el lienzo,
         # restaurar la imagen original en el lienzo
-        if prev_mode == "prep" and mode != "prep" and self._original_qimage is not None:
+        if (
+            prev_mode in ("prep", "pbr")
+            and mode not in ("prep", "pbr")
+            and self._original_qimage is not None
+        ):
             self.canvas.set_image(self._original_qimage, keep_view=True)
 
         if mode == "ripper":
@@ -325,6 +359,7 @@ class MainWindow(QMainWindow):
             self.action_mode_ripper.setChecked(True)
             self.action_mode_sprites.setChecked(False)
             self.action_mode_prep.setChecked(False)
+            self.action_mode_pbr.setChecked(False)
         elif mode == "sprites":
             self.canvas.set_tool(self.sprite_tool)
             self.dock_sprites.show()
@@ -332,6 +367,7 @@ class MainWindow(QMainWindow):
             self.action_mode_ripper.setChecked(False)
             self.action_mode_sprites.setChecked(True)
             self.action_mode_prep.setChecked(False)
+            self.action_mode_pbr.setChecked(False)
         elif mode == "prep":
             self.canvas.set_tool(self.prep_tool)
             self.dock_prep.show()
@@ -339,7 +375,17 @@ class MainWindow(QMainWindow):
             self.action_mode_ripper.setChecked(False)
             self.action_mode_sprites.setChecked(False)
             self.action_mode_prep.setChecked(True)
+            self.action_mode_pbr.setChecked(False)
             self._update_prep_canvas_image()
+        elif mode == "pbr":
+            self.canvas.set_tool(self.pbr_tool)
+            self.dock_pbr.show()
+            self.dock_pbr.raise_()
+            self.action_mode_ripper.setChecked(False)
+            self.action_mode_sprites.setChecked(False)
+            self.action_mode_prep.setChecked(False)
+            self.action_mode_pbr.setChecked(True)
+            self._update_pbr_canvas_image()
 
         self._update_actions()
 
@@ -348,6 +394,15 @@ class MainWindow(QMainWindow):
             return
         if self.prep_tool.processed_pixels is not None:
             qimg = rgba_array_to_qimage(self.prep_tool.processed_pixels)
+            self.canvas.set_image(qimg, keep_view=True)
+        elif self._original_qimage is not None:
+            self.canvas.set_image(self._original_qimage, keep_view=True)
+
+    def _update_pbr_canvas_image(self) -> None:
+        if self._current_mode != "pbr":
+            return
+        if self.pbr_tool.processed_pixels is not None:
+            qimg = rgba_array_to_qimage(self.pbr_tool.processed_pixels)
             self.canvas.set_image(qimg, keep_view=True)
         elif self._original_qimage is not None:
             self.canvas.set_image(self._original_qimage, keep_view=True)
@@ -381,6 +436,10 @@ class MainWindow(QMainWindow):
         self.prep_tool.texture_updated.connect(self._on_prep_texture_updated)
         self.prep_panel.prep_modified.connect(self._on_prep_modified)
         self.prep_panel.texture_exported.connect(self._on_prep_texture_exported)
+        self.pbr_tool.map_updated.connect(self._on_pbr_map_updated)
+        self.pbr_panel.pbr_modified.connect(self._on_pbr_modified)
+        self.pbr_panel.map_exported.connect(self._on_pbr_map_exported)
+        self.pbr_panel.maps_batch_exported.connect(self._on_pbr_batch_exported)
 
     def _on_export_finished(self, path: Path) -> None:
         self.statusBar().showMessage(
@@ -417,6 +476,32 @@ class MainWindow(QMainWindow):
             self.tr("Textura exportada en: {name}").format(name=path.name), 6000
         )
 
+    def _on_pbr_map_updated(self) -> None:
+        if self._current_mode == "pbr":
+            self._update_pbr_canvas_image()
+        self._update_actions()
+
+    def _on_pbr_modified(self) -> None:
+        self._update_actions()
+        if self.canvas.has_image:
+            self._document.touch_modified()
+            self._update_window_title()
+
+    def _on_pbr_map_exported(self, path: Path) -> None:
+        self.statusBar().showMessage(
+            self.tr("Mapa PBR exportado en: {name}").format(name=path.name), 6000
+        )
+
+    def _on_pbr_batch_exported(self, exported_files: list[Path]) -> None:
+        count = len(exported_files)
+        folder_name = exported_files[0].parent.name if exported_files else ""
+        self.statusBar().showMessage(
+            self.tr("Set de mapas PBR exportado ({count} mapas) en: {folder}").format(
+                count=count, folder=folder_name
+            ),
+            6000,
+        )
+
     def _update_actions(self) -> None:
         has_image = self.canvas.has_image
         self.action_save_project.setEnabled(has_image)
@@ -432,6 +517,7 @@ class MainWindow(QMainWindow):
         self.action_export_prep.setEnabled(
             has_image and self.prep_tool.processed_pixels is not None
         )
+        self.action_export_pbr.setEnabled(has_image and self.pbr_tool.processed_pixels is not None)
         for action in self._view_actions:
             action.setEnabled(has_image)
 
@@ -514,6 +600,8 @@ class MainWindow(QMainWindow):
         self.sprite_panel.set_source_image(None)
         self.prep_panel.set_source_image(None)
         self.prep_panel.set_settings(TexturePrepSettings())
+        self.pbr_panel.set_source_image(None)
+        self.pbr_panel.set_settings(PbrSettings())
         self._update_window_title()
         self._update_actions()
         self._refresh_status()
@@ -569,8 +657,12 @@ class MainWindow(QMainWindow):
         self.sprite_panel.set_source_image(loaded)
         self.prep_panel.set_source_image(loaded)
         self.prep_panel.set_settings(TexturePrepSettings())
+        self.pbr_panel.set_source_image(loaded)
+        self.pbr_panel.set_settings(PbrSettings())
         if self._current_mode == "prep":
             self._update_prep_canvas_image()
+        elif self._current_mode == "pbr":
+            self._update_pbr_canvas_image()
         self._update_window_title()
         self._update_actions()
         self._refresh_status()
@@ -655,6 +747,12 @@ class MainWindow(QMainWindow):
         if self._current_mode == "prep":
             self._update_prep_canvas_image()
 
+        # Restaurar mapas PBR
+        self.pbr_panel.set_source_image(loaded)
+        self.pbr_panel.set_settings(doc.pbr)
+        if self._current_mode == "pbr":
+            self._update_pbr_canvas_image()
+
         self._update_window_title()
         self._update_actions()
         self._refresh_status()
@@ -720,6 +818,9 @@ class MainWindow(QMainWindow):
 
         # Sincronizar preparación y mosaico
         self._document.texture_prep = self.prep_panel.get_settings()
+
+        # Sincronizar mapas PBR
+        self._document.pbr = self.pbr_panel.get_settings()
 
         img_bytes = self._get_current_image_bytes()
 

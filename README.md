@@ -4,8 +4,8 @@ Suite de escritorio para extraer, transformar, organizar y preparar texturas y s
 
 ## Estado del proyecto
 
-* **Fase actual:** Fase 5 completada (Preparación de texturas y mosaico: filtros no destructivos de brillo, contraste, saturación, ecualización/aplanado de iluminación, balance RGB; generador de textura seamless con mezcla separable continua; vista interactiva en mosaico NxN; persistencia y exportación dedicada).
-* **Próxima fase:** Fase 6 (Generación de mapas PBR y normales).
+* **Fase actual:** Fase 6 completada (Generación de mapas PBR y normales: mapa de normales en espacio tangente con soporte OpenGL +Y y DirectX -Y, relieve/altura con inversión y contraste, mapa de rugosidad con extracción de micro-detalles y modo glossiness, oclusión ambiental/cavidades locales, empaquetado multicanal ORM y RMA, selector en lienzo en tiempo real, exportación individual y lote completo).
+* **Próxima fase:** Fase 7 (Generador de fuentes de mapa de bits / Bitmap Font Generator).
 * **Plataforma:** Windows (arquitectura multiplataforma preparada).
 
 ---
@@ -131,6 +131,31 @@ Suite de escritorio para extraer, transformar, organizar y preparar texturas y s
 4. **Integración de proyecto y exportación (`core.document`, `exporters.image_exporter`)**:
    - Nuevo modelo de datos `TexturePrepSettings` integrado transparentemente en proyectos `.ivtex` manteniendo retrocompatibilidad total con proyectos de fases anteriores.
    - Exportación dedicada de la textura preparada resultante en PNG, JPEG, WebP, BMP y TGA.
+
+### Fase 6: Generación de mapas PBR y normales
+1. **Motor de computación de mapas PBR (`imaging.pbr`)**:
+   - Algoritmo desacoplado de Qt basado en NumPy y OpenCV para procesamiento vectorial de alta eficiencia.
+   - **Mapa de Normales en espacio tangente**: Derivadas espaciales de Sobel en $X$ e $Y$, modulación de fuerza, normalización a vector unitario $[0.0, 1.0]^3$ y codificación RGB $(128, 128, 255)$ para superficies planas.
+   - Soporte de estándares de motores 3D: **OpenGL** ($+Y$, estándar en Blender, Godot) y **DirectX** ($-Y$, estándar en Unreal Engine), con casillas para inversión individual de canales $X$ (Rojo) e $Y$ (Verde).
+   - **Mapa de Altura / Relieve (Height/Bump)**: Conversión de luminancia ponderada (percepción ITU-R BT.601), ajuste de contraste, brillo, suavizado y opción de inversión.
+   - **Mapa de Rugosidad (Roughness)**: Extracción de micro-detalles y frecuencias altas mediante operadores laplacianos y combinación con rugosidad base, con modo de inversión para rugosidad inversa / brillo (*Glossiness*).
+   - **Oclusión Ambiental (AO)**: Detección de concavidades locales y hendiduras mediante desenfoque adaptativo y diferencia espectral con radio y contraste configurables.
+   - **Empaquetado multicanal**: Combinación de mapas en una sola textura compactada:
+     - Formato **ORM** estándar: Canal R = Oclusión Ambiental, Canal G = Rugosidad, Canal B = Metálico.
+     - Formato **RMA**: Canal R = Rugosidad, Canal G = Metálico, Canal B = Oclusión Ambiental.
+
+2. **Panel de control e interactividad en vivo (`PbrTool` y `PbrPanel`)**:
+   - Modo 4 dedicado (*Modo Mapas PBR y Normales*) con acceso rápido desde menú, barra de herramientas y pestañas acoplables.
+   - Selector en tiempo real del mapa proyectado en el lienzo principal (Normales, Altura, Rugosidad, AO, Empaquetado ORM/RMA o Textura original/Albedo).
+   - Controles numéricos y deslizadores con sincronización bidireccional inmediata.
+   - Botón de restablecimiento a parámetros óptimos estándar.
+
+3. **Exportación individual y por lotes (`exporters.image_exporter`)**:
+   - Exportación rápida del mapa actualmente seleccionado en el visor.
+   - **Exportación de set PBR completo en 1 clic**: Genera automáticamente en la carpeta de destino todos los mapas asociados con sufijos estándar del sector (`_normal.png`, `_height.png`, `_roughness.png`, `_ao.png`, `_orm.png`/`_rma.png`).
+
+4. **Persistencia completa en proyectos `.ivtex`**:
+   - Dataclass `PbrSettings` serializada y deserializada en el contenedor de proyecto sin alterar proyectos preexistentes.
 
 ---
 

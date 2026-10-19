@@ -177,6 +177,79 @@ class TexturePrepSettings:
 
 
 @dataclass
+class PbrSettings:
+    """Configuración para la generación de mapas PBR y normales."""
+
+    normal_strength: float = 2.0
+    format_opengl: bool = True
+    normal_blur: int = 0
+    invert_x: bool = False
+    invert_y: bool = False
+
+    height_contrast: float = 1.0
+    height_brightness: float = 0.0
+    height_invert: bool = False
+    height_blur: int = 0
+
+    base_roughness: float = 0.5
+    roughness_detail: float = 0.3
+    roughness_invert: bool = False
+    roughness_contrast: float = 1.0
+
+    ao_strength: float = 1.5
+    ao_radius: int = 5
+    ao_contrast: float = 1.0
+
+    metallic: float = 0.0
+    packing_format: str = "ORM"  # "ORM" o "RMA"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "normal_strength": self.normal_strength,
+            "format_opengl": self.format_opengl,
+            "normal_blur": self.normal_blur,
+            "invert_x": self.invert_x,
+            "invert_y": self.invert_y,
+            "height_contrast": self.height_contrast,
+            "height_brightness": self.height_brightness,
+            "height_invert": self.height_invert,
+            "height_blur": self.height_blur,
+            "base_roughness": self.base_roughness,
+            "roughness_detail": self.roughness_detail,
+            "roughness_invert": self.roughness_invert,
+            "roughness_contrast": self.roughness_contrast,
+            "ao_strength": self.ao_strength,
+            "ao_radius": self.ao_radius,
+            "ao_contrast": self.ao_contrast,
+            "metallic": self.metallic,
+            "packing_format": self.packing_format,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PbrSettings:
+        return cls(
+            normal_strength=float(data.get("normal_strength", 2.0)),
+            format_opengl=bool(data.get("format_opengl", True)),
+            normal_blur=int(data.get("normal_blur", 0)),
+            invert_x=bool(data.get("invert_x", False)),
+            invert_y=bool(data.get("invert_y", False)),
+            height_contrast=float(data.get("height_contrast", 1.0)),
+            height_brightness=float(data.get("height_brightness", 0.0)),
+            height_invert=bool(data.get("height_invert", False)),
+            height_blur=int(data.get("height_blur", 0)),
+            base_roughness=float(data.get("base_roughness", 0.5)),
+            roughness_detail=float(data.get("roughness_detail", 0.3)),
+            roughness_invert=bool(data.get("roughness_invert", False)),
+            roughness_contrast=float(data.get("roughness_contrast", 1.0)),
+            ao_strength=float(data.get("ao_strength", 1.5)),
+            ao_radius=int(data.get("ao_radius", 5)),
+            ao_contrast=float(data.get("ao_contrast", 1.0)),
+            metallic=float(data.get("metallic", 0.0)),
+            packing_format=str(data.get("packing_format", "ORM")),
+        )
+
+
+@dataclass
 class Document:
     """Documento de trabajo principal."""
 
@@ -187,6 +260,7 @@ class Document:
     sprites: list[SpriteRegion] = field(default_factory=list)
     atlas: AtlasSettings = field(default_factory=AtlasSettings)
     texture_prep: TexturePrepSettings = field(default_factory=TexturePrepSettings)
+    pbr: PbrSettings = field(default_factory=PbrSettings)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     modified_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     is_modified: bool = False
@@ -213,6 +287,7 @@ class Document:
             "sprites": [s.to_dict() for s in self.sprites],
             "atlas": self.atlas.to_dict(),
             "texture_prep": self.texture_prep.to_dict(),
+            "pbr": self.pbr.to_dict(),
         }
 
     @classmethod
@@ -235,6 +310,8 @@ class Document:
             if isinstance(prep_data, dict)
             else TexturePrepSettings()
         )
+        pbr_data = data.get("pbr", {})
+        pbr = PbrSettings.from_dict(pbr_data) if isinstance(pbr_data, dict) else PbrSettings()
 
         return cls(
             project_name=project_name,
@@ -244,6 +321,7 @@ class Document:
             sprites=sprites,
             atlas=atlas,
             texture_prep=texture_prep,
+            pbr=pbr,
             created_at=str(data.get("created_at", datetime.now(UTC).isoformat())),
             modified_at=str(data.get("modified_at", datetime.now(UTC).isoformat())),
             is_modified=False,

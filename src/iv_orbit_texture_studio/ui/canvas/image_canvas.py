@@ -105,6 +105,8 @@ class ImageCanvas(QWidget):
                     self._tool.sprites_changed.disconnect(self.update)
                 if hasattr(self._tool, "texture_updated"):
                     self._tool.texture_updated.disconnect(self.update)
+                if hasattr(self._tool, "map_updated"):
+                    self._tool.map_updated.disconnect(self.update)
         self._tool = tool
         if self._tool is not None:
             if hasattr(self._tool, "selection_changed"):
@@ -113,6 +115,8 @@ class ImageCanvas(QWidget):
                 self._tool.sprites_changed.connect(self.update)
             if hasattr(self._tool, "texture_updated"):
                 self._tool.texture_updated.connect(self.update)
+            if hasattr(self._tool, "map_updated"):
+                self._tool.map_updated.connect(self.update)
             if self._image_size is not None and hasattr(self._tool, "set_image_size"):
                 self._tool.set_image_size(self._image_size)
         self.update()

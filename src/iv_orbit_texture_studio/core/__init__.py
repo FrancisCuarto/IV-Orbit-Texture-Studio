@@ -1,6 +1,7 @@
 from iv_orbit_texture_studio.core.document import (
     AtlasSettings,
     Document,
+    PbrSettings,
     SourceImageInfo,
     TexturePrepSettings,
     TextureRipperData,
@@ -15,6 +16,7 @@ from iv_orbit_texture_studio.core.region import (
 __all__ = [
     "AtlasSettings",
     "Document",
+    "PbrSettings",
     "Pivot",
     "PivotMode",
     "Rect",
