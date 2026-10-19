@@ -24,3 +24,27 @@ def test_rgba_array_to_qimage_invalid():
 
     with pytest.raises(ValueError):
         rgba_array_to_qimage(np.zeros((10, 10, 4), dtype=np.float32))
+
+
+def test_qimage_to_rgba_array_roundtrip(qapp):
+    from iv_orbit_texture_studio.ui.qt_image import qimage_to_rgba_array
+
+    orig_arr = np.zeros((30, 40, 4), dtype=np.uint8)
+    orig_arr[:, :, 0] = 200
+    orig_arr[:, :, 1] = 100
+    orig_arr[:, :, 2] = 50
+    orig_arr[:, :, 3] = 255
+
+    qimg = rgba_array_to_qimage(orig_arr)
+    result_arr = qimage_to_rgba_array(qimg)
+
+    assert result_arr.shape == (30, 40, 4)
+    assert result_arr.dtype == np.uint8
+    assert np.array_equal(orig_arr, result_arr)
+
+
+def test_qimage_to_rgba_array_invalid():
+    from iv_orbit_texture_studio.ui.qt_image import qimage_to_rgba_array
+
+    with pytest.raises(ValueError):
+        qimage_to_rgba_array(QImage())

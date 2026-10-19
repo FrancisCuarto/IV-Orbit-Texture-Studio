@@ -15,6 +15,7 @@ from iv_orbit_texture_studio.core.region import Pivot, Rect, SpriteRegion
 from iv_orbit_texture_studio.imaging.sprites import (
     detect_sprites_by_transparency,
 )
+from iv_orbit_texture_studio.tools.sprites.atlas_tool import AtlasTool
 from iv_orbit_texture_studio.ui.canvas.coordinate_mapper import CoordinateMapper, Point, Size
 
 if TYPE_CHECKING:
@@ -40,6 +41,8 @@ class SpriteTool(QObject):
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        self.atlas_tool: AtlasTool = AtlasTool(self)
+        self._submode: str = "sprites"  # "sprites" o "atlas"
         self._sprites: list[SpriteRegion] = []
         self._selected_id: str | None = None
         self._image_size: Size | None = None
@@ -49,6 +52,19 @@ class SpriteTool(QObject):
         self._drag_start_screen: QPointF | None = None
         self._drag_orig_rect: Rect | None = None
         self._create_start_img: Point | None = None
+
+        self.atlas_tool.atlas_changed.connect(self.sprites_changed)
+
+    # ------------------------------------------------------------- propiedades
+    @property
+    def submode(self) -> str:
+        return self._submode
+
+    @submode.setter
+    def submode(self, mode: str) -> None:
+        if mode in ("sprites", "atlas") and self._submode != mode:
+            self._submode = mode
+            self.sprites_changed.emit()
 
     # ------------------------------------------------------------- propiedades
     @property
@@ -192,6 +208,9 @@ class SpriteTool(QObject):
         event: QMouseEvent,
         mapper: CoordinateMapper,
     ) -> bool:
+        if self._submode == "atlas":
+            return self.atlas_tool.handle_mouse_press(event, mapper)
+
         if self._image_size is None or event.button() != Qt.MouseButton.LeftButton:
             return False
 
@@ -224,6 +243,9 @@ class SpriteTool(QObject):
         event: QMouseEvent,
         mapper: CoordinateMapper,
     ) -> bool:
+        if self._submode == "atlas":
+            return self.atlas_tool.handle_mouse_move(event, mapper)
+
         if not (event.buttons() & Qt.MouseButton.LeftButton):
             if self._drag_mode is not None:
                 self.handle_mouse_release(event, mapper)
@@ -289,6 +311,9 @@ class SpriteTool(QObject):
         event: QMouseEvent,
         mapper: CoordinateMapper,
     ) -> bool:
+        if self._submode == "atlas":
+            return self.atlas_tool.handle_mouse_release(event, mapper)
+
         if self._drag_mode is not None:
             self._drag_mode = None
             self._drag_start_screen = None
@@ -301,11 +326,17 @@ class SpriteTool(QObject):
         return False
 
     def handle_key_press(self, event: QKeyEvent) -> bool:
+        if self._submode == "atlas":
+            return self.atlas_tool.handle_key_press(event)
+
         if event.key() == Qt.Key.Key_Delete or event.key() == Qt.Key.Key_Backspace:
             return self.remove_selected()
         return False
 
     def get_cursor(self) -> Qt.CursorShape | None:
+        if self._submode == "atlas":
+            return self.atlas_tool.get_cursor()
+
         if self._drag_mode == "move":
             return Qt.CursorShape.SizeAllCursor
         if self._drag_mode == "create":
@@ -315,6 +346,10 @@ class SpriteTool(QObject):
     # ---------------------------------------------------------------- pintura
     def paint_overlay(self, painter: QPainter, mapper: CoordinateMapper) -> None:
         """Dibuja las cajas delimitadoras de todos los sprites y sus pivotes."""
+        if self._submode == "atlas":
+            self.atlas_tool.paint_overlay(painter, mapper)
+            return
+
         if not self._sprites:
             return
 

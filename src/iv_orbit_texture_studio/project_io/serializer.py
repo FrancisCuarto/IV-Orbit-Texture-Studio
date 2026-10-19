@@ -16,10 +16,15 @@ import json
 import os
 import uuid
 import zipfile
+from io import BytesIO
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from PIL import Image
+
+from iv_orbit_texture_studio.core.atlas_item import AtlasItem
 from iv_orbit_texture_studio.core.document import Document
+from iv_orbit_texture_studio.imaging.image_io import load_image_from_bytes
 from iv_orbit_texture_studio.project_io.migrations import (
     migrate_project_dict,
 )
@@ -27,7 +32,7 @@ from iv_orbit_texture_studio.project_io.migrations import (
 #: Límite máximo de descompresión total para evitar ataques tipo zip-bomb (500 MB).
 MAX_TOTAL_UNCOMPRESSED_SIZE_BYTES = 500 * 1024 * 1024
 #: Límite máximo de archivos dentro del contenedor .ivtex.
-MAX_ARCHIVE_FILE_COUNT = 200
+MAX_ARCHIVE_FILE_COUNT = 1000
 #: Límite máximo para el archivo project.json (10 MB).
 MAX_PROJECT_JSON_SIZE_BYTES = 10 * 1024 * 1024
 
@@ -115,6 +120,13 @@ def save_project(
             if embed_image and image_bytes is not None:
                 zf.writestr(document.source.asset_filename, image_bytes)
 
+            # 3. Guardar elementos del atlas si existen
+            for item in document.atlas_items:
+                bio = BytesIO()
+                im = Image.fromarray(item.pixels, mode="RGBA")
+                im.save(bio, format="PNG")
+                zf.writestr(f"assets/items/{item.id}.png", bio.getvalue())
+
         # Reemplazo atómico
         os.replace(temp_path, target_path)
         document.mark_clean(target_path)
@@ -199,6 +211,19 @@ def load_project(path: Path | str) -> tuple[Document, bytes | None]:
                         image_bytes = local_path.read_bytes()
                     except OSError:
                         image_bytes = None
+
+            # Cargar elementos individuales del atlas si existen
+            items_raw = migrated_dict.get("atlas_items", [])
+            for item_dict in items_raw:
+                if not isinstance(item_dict, dict):
+                    continue
+                item_id = str(item_dict.get("id", ""))
+                asset_path = str(item_dict.get("asset_filename", f"assets/items/{item_id}.png"))
+                if asset_path in zf.namelist():
+                    item_bytes = zf.read(asset_path)
+                    item_loaded = load_image_from_bytes(item_bytes, virtual_path=f"{item_id}.png")
+                    atlas_item = AtlasItem.from_dict(item_dict, item_loaded.pixels)
+                    document.atlas_items.append(atlas_item)
 
             # Si se esperaba una imagen pero no se encontró en ninguna parte
             if image_bytes is None and (document.source.is_embedded or document.source.file_path):

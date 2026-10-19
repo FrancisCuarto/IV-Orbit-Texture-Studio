@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from iv_orbit_texture_studio.core.atlas_item import AtlasItem
 from iv_orbit_texture_studio.core.region import SpriteRegion
 from iv_orbit_texture_studio.imaging.perspective import InterpolationMode, Point, Quad
 
@@ -258,6 +259,7 @@ class Document:
     source: SourceImageInfo = field(default_factory=SourceImageInfo)
     texture_ripper: TextureRipperData = field(default_factory=TextureRipperData)
     sprites: list[SpriteRegion] = field(default_factory=list)
+    atlas_items: list[AtlasItem] = field(default_factory=list)
     atlas: AtlasSettings = field(default_factory=AtlasSettings)
     texture_prep: TexturePrepSettings = field(default_factory=TexturePrepSettings)
     pbr: PbrSettings = field(default_factory=PbrSettings)
@@ -285,6 +287,7 @@ class Document:
             "source": self.source.to_dict(),
             "texture_ripper": self.texture_ripper.to_dict(),
             "sprites": [s.to_dict() for s in self.sprites],
+            "atlas_items": [item.to_dict() for item in self.atlas_items],
             "atlas": self.atlas.to_dict(),
             "texture_prep": self.texture_prep.to_dict(),
             "pbr": self.pbr.to_dict(),

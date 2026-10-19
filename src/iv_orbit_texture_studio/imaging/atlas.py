@@ -7,12 +7,14 @@ soporte para dimensiones potencia de dos (POT) y generación de metadatos JSON e
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
+from iv_orbit_texture_studio.core.atlas_item import AtlasItem
 from iv_orbit_texture_studio.core.region import Pivot, Rect, SpriteRegion
 
 RgbaArray = NDArray[np.uint8]
@@ -333,3 +335,148 @@ def pack_sprites_to_atlas(
         sprites=tuple(packed_sprites),
         metadata=metadata,
     )
+
+
+def composite_atlas_items(
+    items: Sequence[AtlasItem],
+    width: int,
+    height: int,
+    atlas_image_name: str = "atlas.png",
+) -> AtlasResult:
+    """Compone una lista de AtlasItem directamente en sus posiciones (x, y) actuales.
+
+    Permite acomodar texturas libremente con el ratón o previsualizar el atlas manual.
+    """
+    if width <= 0 or height <= 0:
+        width = max(32, width)
+        height = max(32, height)
+
+    atlas_image = np.zeros((height, width, 4), dtype=np.uint8)
+    packed_sprites: list[PackedSprite] = []
+    frames_dict: dict[str, Any] = {}
+
+    for item in items:
+        src_x = 0
+        src_y = 0
+        dst_x = item.x
+        dst_y = item.y
+        w = item.width
+        h = item.height
+
+        # Recorte por la izquierda o arriba si está en coordenadas negativas
+        if dst_x < 0:
+            src_x = -dst_x
+            w -= src_x
+            dst_x = 0
+        if dst_y < 0:
+            src_y = -dst_y
+            h -= src_y
+            dst_y = 0
+
+        # Recorte por la derecha o abajo si excede el lienzo
+        if dst_x + w > width:
+            w = width - dst_x
+        if dst_y + h > height:
+            h = height - dst_y
+
+        if w > 0 and h > 0:
+            atlas_image[dst_y : dst_y + h, dst_x : dst_x + w] = item.pixels[
+                src_y : src_y + h, src_x : src_x + w
+            ]
+
+        atlas_rect = Rect(item.x, item.y, item.width, item.height)
+        ps = PackedSprite(
+            region_id=item.id,
+            name=item.name,
+            source_rect=Rect(0, 0, item.width, item.height),
+            atlas_rect=atlas_rect,
+            pivot=item.pivot,
+        )
+        packed_sprites.append(ps)
+
+        frames_dict[item.name] = {
+            "frame": {
+                "x": item.x,
+                "y": item.y,
+                "w": item.width,
+                "h": item.height,
+            },
+            "rotated": False,
+            "trimmed": False,
+            "spriteSourceSize": {
+                "x": 0,
+                "y": 0,
+                "w": item.width,
+                "h": item.height,
+            },
+            "sourceSize": {
+                "w": item.width,
+                "h": item.height,
+            },
+            "pivot": {
+                "x": round(item.pivot.x, 4),
+                "y": round(item.pivot.y, 4),
+            },
+        }
+
+    metadata = {
+        "meta": {
+            "app": "IV Orbit Texture Studio",
+            "version": "1.0",
+            "image": atlas_image_name,
+            "format": "RGBA8888",
+            "size": {"w": width, "h": height},
+            "scale": 1.0,
+        },
+        "frames": frames_dict,
+    }
+
+    atlas_image.setflags(write=False)
+    return AtlasResult(
+        image=atlas_image,
+        width=width,
+        height=height,
+        sprites=tuple(packed_sprites),
+        metadata=metadata,
+    )
+
+
+def auto_pack_atlas_items(
+    items: Sequence[AtlasItem],
+    *,
+    padding: int = 2,
+    spacing: int = 2,
+    max_width: int = 4096,
+    max_height: int = 4096,
+    power_of_two: bool = True,
+    square: bool = False,
+    atlas_image_name: str = "atlas.png",
+) -> AtlasResult:
+    """Empaqueta automáticamente todos los AtlasItem usando MaxRects y actualiza sus (x, y)."""
+    sprites_with_pixels = [
+        (
+            SpriteRegion(item.id, item.name, Rect(0, 0, item.width, item.height), item.pivot),
+            item.pixels,
+        )
+        for item in items
+    ]
+
+    result = pack_sprites_to_atlas(
+        sprites_with_pixels,
+        padding=padding,
+        spacing=spacing,
+        max_width=max_width,
+        max_height=max_height,
+        power_of_two=power_of_two,
+        square=square,
+        atlas_image_name=atlas_image_name,
+    )
+
+    placed_map = {ps.region_id: ps.atlas_rect for ps in result.sprites}
+    for item in items:
+        if item.id in placed_map:
+            placed = placed_map[item.id]
+            item.x = placed.x
+            item.y = placed.y
+
+    return result

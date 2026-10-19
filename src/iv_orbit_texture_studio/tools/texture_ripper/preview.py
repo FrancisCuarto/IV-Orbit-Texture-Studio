@@ -45,6 +45,7 @@ class TextureRipperPanel(QWidget):
     """Panel lateral que administra los parámetros de rectificación y exportación."""
 
     export_requested = Signal(Path)
+    add_to_atlas_requested = Signal(object, str)
 
     def __init__(
         self,
@@ -160,8 +161,23 @@ class TextureRipperPanel(QWidget):
         v_prev.addWidget(self._preview_frame)
         layout.addWidget(group_prev)
 
-        # 4. Botón de Exportación
-        self._btn_export = QPushButton(self.tr("Exportar textura…"))
+        # 4. Botones de Acción
+        self._btn_add_to_atlas = QPushButton(self.tr("➕ Añadir al Atlas"))
+        self._btn_add_to_atlas.setToolTip(
+            self.tr(
+                "Rectifica la perspectiva actual y la añade como una pieza al Atlas (Ctrl+Shift+A)"
+            )
+        )
+        self._btn_add_to_atlas.setStyleSheet(
+            "QPushButton { font-weight: bold; padding: 8px; "
+            "background-color: #2b7a32; color: white; border-radius: 4px; }\n"
+            "QPushButton:hover { background-color: #35963e; }\n"
+            "QPushButton:disabled { background-color: #444444; color: #888888; }"
+        )
+        self._btn_add_to_atlas.clicked.connect(self.add_to_atlas)
+        layout.addWidget(self._btn_add_to_atlas)
+
+        self._btn_export = QPushButton(self.tr("Exportar textura individual…"))
         self._btn_export.setStyleSheet(
             "QPushButton { font-weight: bold; padding: 8px; "
             "background-color: #0e70a0; color: white; border-radius: 4px; }\n"
@@ -238,6 +254,7 @@ class TextureRipperPanel(QWidget):
         self._btn_reset_rect.setEnabled(has_img)
         self._btn_clear.setEnabled(has_img and sel.count > 0)
         self._btn_estimate.setEnabled(has_img and is_valid)
+        self._btn_add_to_atlas.setEnabled(has_img and is_valid)
         self._btn_export.setEnabled(has_img and is_valid)
 
         if not has_img:
@@ -348,6 +365,34 @@ class TextureRipperPanel(QWidget):
             if self._combo_interp.itemData(idx) == mode:
                 self._combo_interp.setCurrentIndex(idx)
                 break
+
+    def add_to_atlas(self) -> None:
+        """Rectifica la selección actual y emite add_to_atlas_requested."""
+        if self._source_image is None or not self._tool.selection.is_valid():
+            return
+
+        quad = self._tool.selection.get_quad()
+        if quad is None:
+            return
+
+        out_w = self._spin_width.value()
+        out_h = self._spin_height.value()
+        mode = InterpolationMode(self._combo_interp.currentData())
+
+        try:
+            full_rectified = rectify_perspective(
+                self._source_image.pixels,
+                quad,
+                out_w,
+                out_h,
+                interpolation=mode,
+            )
+            stem = self._source_image.path.stem
+            suggested_name = f"{stem}_x{int(quad.p0.x)}_y{int(quad.p0.y)}"
+            self.add_to_atlas_requested.emit(full_rectified, suggested_name)
+        except Exception as exc:
+            logger.exception("Error al rectificar textura para el atlas: %s", exc)
+            self._show_error(self.tr("Error al rectificar para el atlas"), str(exc))
 
     def export_texture(self) -> None:
         if self._source_image is None or not self._tool.selection.is_valid():

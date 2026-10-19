@@ -1,3 +1,4 @@
+from iv_orbit_texture_studio.core.atlas_item import AtlasItem
 from iv_orbit_texture_studio.core.document import (
     AtlasSettings,
     Document,
@@ -14,6 +15,7 @@ from iv_orbit_texture_studio.core.region import (
 )
 
 __all__ = [
+    "AtlasItem",
     "AtlasSettings",
     "Document",
     "PbrSettings",

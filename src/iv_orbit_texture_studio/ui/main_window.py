@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from iv_orbit_texture_studio.core.atlas_item import AtlasItem
 from iv_orbit_texture_studio.core.commands import MoveVertexCommand, SetQuadCommand
 from iv_orbit_texture_studio.core.document import (
     Document,
@@ -52,12 +53,12 @@ from iv_orbit_texture_studio.project_io import (
     save_project,
 )
 from iv_orbit_texture_studio.tools.pbr import PbrPanel, PbrTool
-from iv_orbit_texture_studio.tools.sprites import SpritePanel, SpriteTool
+from iv_orbit_texture_studio.tools.sprites import AtlasTool, SpritePanel, SpriteTool
 from iv_orbit_texture_studio.tools.texture_prep import TexturePrepPanel, TexturePrepTool
 from iv_orbit_texture_studio.tools.texture_ripper.preview import TextureRipperPanel
 from iv_orbit_texture_studio.tools.texture_ripper.tool import TextureRipperTool
 from iv_orbit_texture_studio.ui.canvas.image_canvas import ImageCanvas
-from iv_orbit_texture_studio.ui.qt_image import rgba_array_to_qimage
+from iv_orbit_texture_studio.ui.qt_image import qimage_to_rgba_array, rgba_array_to_qimage
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ class MainWindow(QMainWindow):
         self._document: Document = Document()
         self.undo_stack: QUndoStack = QUndoStack(self)
         self.prompt_on_close: bool = "PYTEST_CURRENT_TEST" not in os.environ
+        self._clipboard_count: int = 0
 
         self.setWindowTitle(APP_TITLE)
         self.resize(1200, 800)
@@ -157,6 +159,10 @@ class MainWindow(QMainWindow):
         self.action_open.setShortcut(QKeySequence.StandardKey.Open)
         self.action_open.triggered.connect(self.open_image_dialog)
 
+        self.action_paste = QAction(self.tr("&Pegar captura del portapapeles"), self)
+        self.action_paste.setShortcut(QKeySequence.StandardKey.Paste)
+        self.action_paste.triggered.connect(self.paste_from_clipboard)
+
         self.action_open_project = QAction(self.tr("Abrir &proyecto…"), self)
         self.action_open_project.setShortcut(QKeySequence("Ctrl+Shift+O"))
         self.action_open_project.triggered.connect(self.open_project_dialog)
@@ -172,6 +178,10 @@ class MainWindow(QMainWindow):
         self.action_export = QAction(self.tr("&Exportar textura rectificada…"), self)
         self.action_export.setShortcut(QKeySequence("Ctrl+E"))
         self.action_export.triggered.connect(self.ripper_panel.export_texture)
+
+        self.action_add_to_atlas = QAction(self.tr("➕ &Añadir al Atlas"), self)
+        self.action_add_to_atlas.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        self.action_add_to_atlas.triggered.connect(self.ripper_panel.add_to_atlas)
 
         self.action_export_atlas = QAction(self.tr("Exportar &atlas de sprites…"), self)
         self.action_export_atlas.setShortcut(QKeySequence("Ctrl+Shift+E"))
@@ -274,12 +284,14 @@ class MainWindow(QMainWindow):
         menu_file.addAction(self.action_new_project)
         menu_file.addSeparator()
         menu_file.addAction(self.action_open)
+        menu_file.addAction(self.action_paste)
         menu_file.addAction(self.action_open_project)
         menu_file.addSeparator()
         menu_file.addAction(self.action_save_project)
         menu_file.addAction(self.action_save_project_as)
         menu_file.addSeparator()
         menu_file.addAction(self.action_export)
+        menu_file.addAction(self.action_add_to_atlas)
         menu_file.addAction(self.action_export_atlas)
         menu_file.addAction(self.action_export_prep)
         menu_file.addAction(self.action_export_pbr)
@@ -289,6 +301,9 @@ class MainWindow(QMainWindow):
         menu_edit = self.menuBar().addMenu(self.tr("&Editar"))
         menu_edit.addAction(self.action_undo)
         menu_edit.addAction(self.action_redo)
+        menu_edit.addSeparator()
+        menu_edit.addAction(self.action_paste)
+        menu_edit.addAction(self.action_add_to_atlas)
         menu_edit.addSeparator()
         menu_edit.addAction(self.action_corners)
         menu_edit.addAction(self.action_reset_sel)
@@ -300,6 +315,7 @@ class MainWindow(QMainWindow):
         menu_tools.addAction(self.action_mode_prep)
         menu_tools.addAction(self.action_mode_pbr)
         menu_tools.addSeparator()
+        menu_tools.addAction(self.action_add_to_atlas)
         menu_tools.addAction(self.action_detect_sprites)
         menu_tools.addAction(self.action_pack_atlas)
 
@@ -319,6 +335,7 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         toolbar.addAction(self.action_new_project)
         toolbar.addAction(self.action_open)
+        toolbar.addAction(self.action_paste)
         toolbar.addAction(self.action_open_project)
         toolbar.addAction(self.action_save_project)
         toolbar.addSeparator()
@@ -326,6 +343,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.action_redo)
         toolbar.addSeparator()
         toolbar.addAction(self.action_export)
+        toolbar.addAction(self.action_add_to_atlas)
         toolbar.addAction(self.action_export_atlas)
         toolbar.addAction(self.action_export_prep)
         toolbar.addAction(self.action_export_pbr)
@@ -343,11 +361,13 @@ class MainWindow(QMainWindow):
         prev_mode = self._current_mode
         self._current_mode = mode
 
-        # Si salimos de modo prep o pbr y teníamos la imagen procesada en el lienzo,
-        # restaurar la imagen original en el lienzo
+        # Si salimos de modo prep o pbr o sprites en submodo atlas, restaurar la imagen original
         if (
-            prev_mode in ("prep", "pbr")
-            and mode not in ("prep", "pbr")
+            (
+                prev_mode in ("prep", "pbr")
+                or (prev_mode == "sprites" and self.sprite_tool.submode == "atlas")
+            )
+            and mode not in ("prep", "pbr", "sprites")
             and self._original_qimage is not None
         ):
             self.canvas.set_image(self._original_qimage, keep_view=True)
@@ -360,6 +380,8 @@ class MainWindow(QMainWindow):
             self.action_mode_sprites.setChecked(False)
             self.action_mode_prep.setChecked(False)
             self.action_mode_pbr.setChecked(False)
+            if self._original_qimage is not None:
+                self.canvas.set_image(self._original_qimage, keep_view=True)
         elif mode == "sprites":
             self.canvas.set_tool(self.sprite_tool)
             self.dock_sprites.show()
@@ -368,6 +390,18 @@ class MainWindow(QMainWindow):
             self.action_mode_sprites.setChecked(True)
             self.action_mode_prep.setChecked(False)
             self.action_mode_pbr.setChecked(False)
+
+            if len(self.atlas_tool.items) > 0:
+                self.sprite_panel.set_active_tab(0)
+                self.sprite_tool.submode = "atlas"
+                self.canvas.set_image(
+                    rgba_array_to_qimage(self.atlas_tool.composite_pixels), keep_view=False
+                )
+            else:
+                self.sprite_panel.set_active_tab(1)
+                self.sprite_tool.submode = "sprites"
+                if self._original_qimage is not None:
+                    self.canvas.set_image(self._original_qimage, keep_view=True)
         elif mode == "prep":
             self.canvas.set_tool(self.prep_tool)
             self.dock_prep.show()
@@ -431,8 +465,11 @@ class MainWindow(QMainWindow):
         self.tool.quad_changed_by_user.connect(self._on_quad_changed_by_user)
         self.undo_stack.cleanChanged.connect(self._on_clean_changed)
         self.ripper_panel.export_requested.connect(self._on_export_finished)
+        self.ripper_panel.add_to_atlas_requested.connect(self._on_add_ripped_to_atlas)
         self.sprite_tool.sprites_changed.connect(self._on_sprites_changed)
         self.sprite_panel.atlas_exported.connect(self._on_atlas_exported)
+        self.sprite_panel.submode_changed.connect(self._on_sprite_submode_changed)
+        self.atlas_tool.atlas_changed.connect(self._on_atlas_changed)
         self.prep_tool.texture_updated.connect(self._on_prep_texture_updated)
         self.prep_panel.prep_modified.connect(self._on_prep_modified)
         self.prep_panel.texture_exported.connect(self._on_prep_texture_exported)
@@ -445,6 +482,49 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             self.tr("Textura exportada en: {name}").format(name=path.name), 6000
         )
+
+    def _on_add_ripped_to_atlas(self, pixels: object, suggested_name: str) -> None:
+        import numpy as np
+
+        assert isinstance(pixels, np.ndarray)
+        item_count = len(self.atlas_tool.items) + 1
+        if (
+            not suggested_name
+            or suggested_name == "ripped_texture"
+            or suggested_name.startswith("captura_")
+        ):
+            name = f"textura_{item_count:02d}"
+        else:
+            name = suggested_name
+        item = AtlasItem.create(name=name, pixels=pixels)
+        self.atlas_tool.add_item(item)
+        self._document.atlas_items = list(self.atlas_tool.items)
+        self._document.touch_modified()
+        self._update_window_title()
+        self._update_actions()
+        self.statusBar().showMessage(
+            self.tr(
+                "➕ Textura '{name}' añadida al Atlas ({count} en total). "
+                "Cambiá a Modo Sprites y Atlas para acomodarla."
+            ).format(name=name, count=len(self.atlas_tool.items)),
+            6000,
+        )
+
+    def _on_sprite_submode_changed(self, submode: str) -> None:
+        if self._current_mode == "sprites":
+            if submode == "atlas":
+                self.canvas.set_image(
+                    rgba_array_to_qimage(self.atlas_tool.composite_pixels), keep_view=True
+                )
+            elif self._original_qimage is not None:
+                self.canvas.set_image(self._original_qimage, keep_view=True)
+
+    def _on_atlas_changed(self) -> None:
+        if self._current_mode == "sprites" and self.sprite_tool.submode == "atlas":
+            self.canvas.set_image(
+                rgba_array_to_qimage(self.atlas_tool.composite_pixels), keep_view=True
+            )
+        self._update_actions()
 
     def _on_sprites_changed(self) -> None:
         self._update_actions()
@@ -504,22 +584,25 @@ class MainWindow(QMainWindow):
 
     def _update_actions(self) -> None:
         has_image = self.canvas.has_image
-        self.action_save_project.setEnabled(has_image)
-        self.action_save_project_as.setEnabled(has_image)
+        has_atlas = len(self.atlas_tool.items) > 0
+        has_sprites = len(self.sprite_tool.sprites) > 0
+
+        self.action_save_project.setEnabled(has_image or has_atlas)
+        self.action_save_project_as.setEnabled(has_image or has_atlas)
         self.action_export.setEnabled(has_image and self.tool.selection.is_valid())
+        self.action_add_to_atlas.setEnabled(has_image and self.tool.selection.is_valid())
         self.action_corners.setEnabled(has_image)
         self.action_reset_sel.setEnabled(has_image)
         self.action_clear_sel.setEnabled(has_image and self.tool.selection.count > 0)
         self.action_detect_sprites.setEnabled(has_image)
-        has_sprites = len(self.sprite_tool.sprites) > 0
         self.action_pack_atlas.setEnabled(has_image and has_sprites)
-        self.action_export_atlas.setEnabled(has_image and has_sprites)
+        self.action_export_atlas.setEnabled(has_atlas or (has_image and has_sprites))
         self.action_export_prep.setEnabled(
             has_image and self.prep_tool.processed_pixels is not None
         )
         self.action_export_pbr.setEnabled(has_image and self.pbr_tool.processed_pixels is not None)
         for action in self._view_actions:
-            action.setEnabled(has_image)
+            action.setEnabled(has_image or has_atlas)
 
     def _update_window_title(self) -> None:
         proj_name = self._document.project_name
@@ -595,6 +678,7 @@ class MainWindow(QMainWindow):
         self.tool.selection.clear()
         self.tool.selection_changed.emit()
         self.sprite_tool.clear()
+        self.atlas_tool.clear()
         self.undo_stack.clear()
         self.ripper_panel.set_source_image(None)
         self.sprite_panel.set_source_image(None)
@@ -620,6 +704,59 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, self.tr("Abrir imagen"), start_dir, filter_text)
         if path:
             self.open_image(Path(path))
+
+    def paste_from_clipboard(self) -> bool:
+        """Pega una captura de pantalla desde el portapapeles del sistema operativo."""
+        clipboard = QGuiApplication.clipboard()
+        qimg = clipboard.image()
+        if qimg.isNull() or qimg.width() == 0 or qimg.height() == 0:
+            self.statusBar().showMessage(
+                self.tr("El portapapeles no contiene una imagen válida"), 4000
+            )
+            return False
+
+        rgba = qimage_to_rgba_array(qimg)
+        self._clipboard_count += 1
+        virtual_name = f"captura_{self._clipboard_count}.png"
+        loaded = LoadedImage(
+            path=Path(virtual_name),
+            pixels=rgba,
+            source_format="PNG",
+            source_mode="RGBA",
+        )
+
+        self._current_image = loaded
+        self._original_qimage = qimg
+        self._document = Document(
+            project_name=f"Captura {self._clipboard_count}",
+            source=SourceImageInfo(
+                file_path=str(loaded.path),
+                asset_filename=virtual_name,
+            ),
+            atlas_items=list(self.atlas_tool.items),
+        )
+        self.undo_stack.clear()
+        self._document.touch_modified()
+
+        self.canvas.set_image(qimg)
+        self.ripper_panel.set_source_image(loaded)
+        self.sprite_panel.set_source_image(loaded)
+        self.prep_panel.set_source_image(loaded)
+        self.prep_panel.set_settings(TexturePrepSettings())
+        self.pbr_panel.set_source_image(loaded)
+        self.pbr_panel.set_settings(PbrSettings())
+
+        self.set_mode("ripper")
+        self.tool.select_image_corners()
+        self._update_window_title()
+        self._update_actions()
+        self._refresh_status()
+        msg = self.tr("Captura pegada ({w} × {h} px). Selecciona las 4 esquinas de la textura.")
+        self.statusBar().showMessage(
+            msg.format(w=qimg.width(), h=qimg.height()),
+            5000,
+        )
+        return True
 
     def open_image(self, path: Path) -> bool:
         """Carga ``path`` y la muestra. Devuelve ``True`` si tuvo éxito."""
@@ -648,6 +785,7 @@ class MainWindow(QMainWindow):
         self._document = Document(
             project_name=path.name,
             source=SourceImageInfo(file_path=str(path)),
+            atlas_items=list(self.atlas_tool.items),
         )
         self.undo_stack.clear()
         self.sprite_tool.clear()
@@ -741,6 +879,7 @@ class MainWindow(QMainWindow):
         # Restaurar sprites y atlas
         self.sprite_tool.set_sprites(list(doc.sprites))
         self.sprite_panel.set_atlas_settings(doc.atlas)
+        self.atlas_tool.set_items(list(doc.atlas_items))
 
         # Restaurar preparación y mosaico
         self.prep_panel.set_settings(doc.texture_prep)
@@ -802,7 +941,7 @@ class MainWindow(QMainWindow):
 
     def save_project(self, path: Path) -> bool:
         """Guarda el proyecto actual en ``path`` de forma atómica."""
-        if not self.canvas.has_image:
+        if not self.canvas.has_image and not self.atlas_tool.items:
             return False
 
         # Sincronizar estado actual del UI en el documento
@@ -815,6 +954,7 @@ class MainWindow(QMainWindow):
         # Sincronizar sprites y atlas
         self._document.sprites = list(self.sprite_tool.sprites)
         self._document.atlas = self.sprite_panel.get_atlas_settings()
+        self._document.atlas_items = list(self.atlas_tool.items)
 
         # Sincronizar preparación y mosaico
         self._document.texture_prep = self.prep_panel.get_settings()
@@ -846,6 +986,10 @@ class MainWindow(QMainWindow):
     @property
     def current_image(self) -> LoadedImage | None:
         return self._current_image
+
+    @property
+    def atlas_tool(self) -> AtlasTool:
+        return self.sprite_tool.atlas_tool
 
     @property
     def document(self) -> Document:

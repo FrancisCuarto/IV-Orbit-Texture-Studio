@@ -90,3 +90,52 @@ def test_pack_sprites_overflow_raises_error():
     s_giant = _make_dummy_sprite("giant", 500, 500, (255, 0, 0, 255))
     with pytest.raises(AtlasFitError, match="no cabe en el atlas"):
         pack_sprites_to_atlas([s_giant], max_width=128, max_height=128)
+
+
+def test_composite_atlas_items_manual():
+    from iv_orbit_texture_studio.core.atlas_item import AtlasItem
+    from iv_orbit_texture_studio.imaging.atlas import composite_atlas_items
+
+    p1 = np.zeros((30, 30, 4), dtype=np.uint8)
+    p1[:, :] = (255, 0, 0, 255)  # Red
+    item1 = AtlasItem.create("item1", p1, x=10, y=10)
+
+    p2 = np.zeros((20, 20, 4), dtype=np.uint8)
+    p2[:, :] = (0, 255, 0, 255)  # Green
+    item2 = AtlasItem.create("item2", p2, x=50, y=50)
+
+    result = composite_atlas_items([item1, item2], width=128, height=128)
+
+    assert result.width == 128
+    assert result.height == 128
+    assert len(result.sprites) == 2
+
+    # Check red pixel at (15, 15)
+    assert np.array_equal(result.image[15, 15], [255, 0, 0, 255])
+    # Check green pixel at (55, 55)
+    assert np.array_equal(result.image[55, 55], [0, 255, 0, 255])
+    # Check background (0, 0) is transparent
+    assert result.image[0, 0, 3] == 0
+
+
+def test_auto_pack_atlas_items():
+    from iv_orbit_texture_studio.core.atlas_item import AtlasItem
+    from iv_orbit_texture_studio.imaging.atlas import auto_pack_atlas_items
+
+    p1 = np.zeros((32, 32, 4), dtype=np.uint8)
+    p1[:, :] = (255, 0, 0, 255)
+    item1 = AtlasItem.create("wall", p1, x=0, y=0)
+
+    p2 = np.zeros((32, 32, 4), dtype=np.uint8)
+    p2[:, :] = (0, 0, 255, 255)
+    item2 = AtlasItem.create("floor", p2, x=0, y=0)
+
+    # Initial positions overlap at (0, 0)
+    assert item1.x == 0 and item2.x == 0
+
+    result = auto_pack_atlas_items([item1, item2], padding=2, spacing=2)
+
+    # After auto-pack, item positions are updated and do NOT overlap
+    assert not item1.rect.intersects(item2.rect)
+    assert result.width >= 32
+    assert result.height >= 32

@@ -236,3 +236,53 @@ def test_project_with_pbr_settings(tmp_path):
     assert loaded.pbr.ao_radius == 7
     assert abs(loaded.pbr.metallic - 0.8) < 1e-4
     assert loaded.pbr.packing_format == "RMA"
+
+
+def test_project_with_atlas_items(tmp_path):
+    import numpy as np
+
+    from iv_orbit_texture_studio.core.atlas_item import AtlasItem
+    from iv_orbit_texture_studio.core.region import Pivot, PivotMode
+
+    proj_file = tmp_path / "atlas_items_proj.ivtex"
+    img_bytes = _make_dummy_image_bytes()
+
+    doc = Document(project_name="Proyecto con Atlas Items")
+
+    item1_pixels = np.zeros((32, 48, 4), dtype=np.uint8)
+    item1_pixels[:, :, 0] = 255
+    item1 = AtlasItem.create(
+        "wall_brick", item1_pixels, x=10, y=20, pivot=Pivot(0.5, 0.5, PivotMode.CENTER)
+    )
+
+    item2_pixels = np.zeros((16, 16, 4), dtype=np.uint8)
+    item2_pixels[:, :, 1] = 255
+    item2_pixels[:, :, 3] = 255
+    item2 = AtlasItem.create(
+        "sign_shop", item2_pixels, x=100, y=150, pivot=Pivot(0.5, 1.0, PivotMode.BOTTOM_CENTER)
+    )
+
+    doc.atlas_items = [item1, item2]
+
+    save_project(proj_file, doc, image_bytes=img_bytes)
+
+    loaded, _ = load_project(proj_file)
+    assert len(loaded.atlas_items) == 2
+
+    l_item1 = loaded.atlas_items[0]
+    assert l_item1.name == "wall_brick"
+    assert l_item1.x == 10
+    assert l_item1.y == 20
+    assert l_item1.width == 48
+    assert l_item1.height == 32
+    assert np.array_equal(l_item1.pixels, item1_pixels)
+    assert l_item1.pivot.mode == PivotMode.CENTER
+
+    l_item2 = loaded.atlas_items[1]
+    assert l_item2.name == "sign_shop"
+    assert l_item2.x == 100
+    assert l_item2.y == 150
+    assert l_item2.width == 16
+    assert l_item2.height == 16
+    assert np.array_equal(l_item2.pixels, item2_pixels)
+    assert l_item2.pivot.mode == PivotMode.BOTTOM_CENTER
