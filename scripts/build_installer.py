@@ -166,15 +166,25 @@ def main() -> int:
     icon_path = BUILD_DIR / "app_icon.ico"
     generate_icon(icon_path)
 
-    # Limpiar compilaciones previas si existen
-    shutil.rmtree(DIST_DIR / APP_BUNDLE_NAME, ignore_errors=True)
-    setup_target = DIST_DIR / f"{INSTALLER_NAME}.exe"
-    if setup_target.exists():
-        setup_target.unlink()
-
-    bundle_dir = build_application_bundle(icon_path)
+    quick = "--installer-only" in sys.argv
     payload_zip = BUILD_DIR / "payload.zip"
-    create_payload_zip(bundle_dir, payload_zip)
+    bundle_dir = DIST_DIR / APP_BUNDLE_NAME
+
+    if quick and bundle_dir.is_dir() and payload_zip.is_file():
+        print("==> Reusando payload.zip existente para recompilar únicamente el instalador...")
+        setup_target = DIST_DIR / f"{INSTALLER_NAME}.exe"
+        if setup_target.exists():
+            setup_target.unlink()
+    else:
+        # Limpiar compilaciones previas si existen
+        shutil.rmtree(bundle_dir, ignore_errors=True)
+        setup_target = DIST_DIR / f"{INSTALLER_NAME}.exe"
+        if setup_target.exists():
+            setup_target.unlink()
+
+        bundle_dir = build_application_bundle(icon_path)
+        create_payload_zip(bundle_dir, payload_zip)
+
     setup_exe = build_setup_exe(icon_path, payload_zip)
 
     size_mb = setup_exe.stat().st_size / (1024 * 1024)

@@ -172,10 +172,17 @@ class InstallerApp:
     """Interfaz gráfica del instalador con estilo oscuro."""
 
     def __init__(self, root: tk.Tk) -> None:
+        if sys.platform == "win32":
+            with contextlib.suppress(Exception):
+                import ctypes
+
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+
         self.root = root
         self.root.title(f"Instalador — {APP_NAME} v{APP_VERSION}")
-        self.root.geometry("560x420")
-        self.root.resizable(False, False)
+        self.root.geometry("580x490")
+        self.root.minsize(540, 440)
+        self.root.resizable(True, True)
         self.root.configure(bg="#161b22")
 
         icon_path = _resource_path("app_icon.ico")
@@ -200,9 +207,9 @@ class InstallerApp:
         muted = "#8b949e"
         accent = "#1f6feb"
 
-        # Encabezado
+        # Encabezado (superior)
         header = tk.Frame(self.root, bg="#0d1117", padx=20, pady=16)
-        header.pack(fill=tk.X)
+        header.pack(fill=tk.X, side=tk.TOP)
         tk.Label(
             header,
             text=f"🧩 {APP_NAME}",
@@ -223,6 +230,52 @@ class InstallerApp:
             anchor="w",
         ).pack(fill=tk.X, pady=(2, 0))
 
+        # Botones inferiores (empaquetados al fondo ANTES del cuerpo para garantizar visibilidad)
+        footer = tk.Frame(self.root, bg="#0d1117", padx=20, pady=14)
+        footer.pack(fill=tk.X, side=tk.BOTTOM)
+
+        self.btn_cancel = tk.Button(
+            footer,
+            text="Salir",
+            font=("Segoe UI", 10),
+            bg=card_bg,
+            fg=fg,
+            activebackground="#30363d",
+            activeforeground=fg,
+            relief=tk.FLAT,
+            padx=18,
+            pady=7,
+            cursor="hand2",
+            command=self.root.destroy,
+        )
+        self.btn_cancel.pack(side=tk.RIGHT, padx=(10, 0))
+
+        self.btn_install = tk.Button(
+            footer,
+            text="▶  Instalar ahora",
+            font=("Segoe UI", 10, "bold"),
+            bg=accent,
+            fg="white",
+            activebackground="#388bfd",
+            activeforeground="white",
+            relief=tk.FLAT,
+            padx=22,
+            pady=7,
+            cursor="hand2",
+            command=self._start_install,
+        )
+        self.btn_install.pack(side=tk.RIGHT)
+
+        # Atajos de teclado convenientes
+        self.root.bind(
+            "<Return>",
+            lambda _e: self._start_install()
+            if str(self.btn_install["state"]) != tk.DISABLED
+            else None,
+        )
+        self.root.bind("<Escape>", lambda _e: self.root.destroy())
+
+        # Cuerpo central (entre encabezado y pie)
         body = tk.Frame(self.root, bg=bg, padx=20, pady=14)
         body.pack(fill=tk.BOTH, expand=True)
 
@@ -301,37 +354,6 @@ class InstallerApp:
             anchor="w",
         ).pack(fill=tk.X)
 
-        # Botones inferiores
-        footer = tk.Frame(self.root, bg="#0d1117", padx=20, pady=12)
-        footer.pack(fill=tk.X, side=tk.BOTTOM)
-
-        self.btn_cancel = tk.Button(
-            footer,
-            text="Salir",
-            font=("Segoe UI", 10),
-            bg=card_bg,
-            fg=fg,
-            relief=tk.FLAT,
-            padx=16,
-            pady=6,
-            command=self.root.destroy,
-        )
-        self.btn_cancel.pack(side=tk.RIGHT, padx=(8, 0))
-
-        self.btn_install = tk.Button(
-            footer,
-            text="Instalar ahora",
-            font=("Segoe UI", 10, "bold"),
-            bg=accent,
-            fg="white",
-            activebackground="#388bfd",
-            activeforeground="white",
-            relief=tk.FLAT,
-            padx=20,
-            pady=6,
-            command=self._start_install,
-        )
-        self.btn_install.pack(side=tk.RIGHT)
 
     def _browse_dir(self) -> None:
         chosen = filedialog.askdirectory(
