@@ -1,8 +1,18 @@
 # IV Orbit Texture Studio
 
-Suite de escritorio para extraer, transformar, organizar y preparar texturas y sprites para videojuegos.
+<div align="center">
 
-## Estado del proyecto
+**Suite de escritorio para extraer, rectificar perspectiva, componer en atlas, transformar libremente y generar materiales PBR para videojuegos.**
+
+[![Descargar para Windows](https://img.shields.io/badge/Descargar-Instalador_Windows_(.exe)-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/FrancisCuarto/IV-Orbit-Texture-Studio/releases/latest/download/IV_Orbit_Texture_Studio_Setup.exe)
+[![Ver Releases](https://img.shields.io/badge/Releases-GitHub-2ea44f?style=for-the-badge&logo=github)](https://github.com/FrancisCuarto/IV-Orbit-Texture-Studio/releases)
+
+[![Última Versión](https://img.shields.io/github/v/release/FrancisCuarto/IV-Orbit-Texture-Studio?style=flat-square&color=0078D6&label=Versi%C3%B3n)](https://github.com/FrancisCuarto/IV-Orbit-Texture-Studio/releases/latest)
+[![Total Descargas](https://img.shields.io/github/downloads/FrancisCuarto/IV-Orbit-Texture-Studio/total?style=flat-square&color=2ea44f&label=Descargas)](https://github.com/FrancisCuarto/IV-Orbit-Texture-Studio/releases)
+
+</div>
+
+---
 
 * **Fase actual:** Fase 6 completada (Generación de mapas PBR y normales: mapa de normales en espacio tangente con soporte OpenGL +Y y DirectX -Y, relieve/altura con inversión y contraste, mapa de rugosidad con extracción de micro-detalles y modo glossiness, oclusión ambiental/cavidades locales, empaquetado multicanal ORM y RMA, selector en lienzo en tiempo real, exportación individual y lote completo).
 * **Próxima fase:** Fase 7 (Generador de fuentes de mapa de bits / Bitmap Font Generator).

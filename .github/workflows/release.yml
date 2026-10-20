@@ -1,0 +1,47 @@
+name: Release Installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Build Standalone Installer & Portable Bundle
+        run: uv run python scripts/build_installer.py
+
+      - name: Create ZIP of Portable Bundle
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist\IVOrbitTextureStudio\*" -DestinationPath "dist\IV_Orbit_Texture_Studio_Portable.zip"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: IV Orbit Texture Studio ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/IV_Orbit_Texture_Studio_Setup.exe
+            dist/IV_Orbit_Texture_Studio_Portable.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
