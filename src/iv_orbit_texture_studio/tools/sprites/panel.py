@@ -73,6 +73,7 @@ class SpritePanel(QWidget):
         self._updating_table = False
         self._updating_atlas_table = False
         self._updating_atlas_pos = False
+        self._updating_atlas_size = False
         self._last_atlas_result: AtlasResult | None = None
 
         self._setup_ui()
@@ -81,6 +82,7 @@ class SpritePanel(QWidget):
         self._tool.atlas_tool.atlas_changed.connect(self._on_atlas_changed)
         self._tool.atlas_tool.item_selected.connect(self._on_atlas_item_selected)
         self._tool.atlas_tool.item_moved.connect(self._on_atlas_item_moved)
+        self._tool.atlas_tool.item_resized.connect(self._on_atlas_item_resized)
 
         self._update_ui_state()
         self._update_atlas_ui_state()
@@ -180,6 +182,37 @@ class SpritePanel(QWidget):
         h_pos.addWidget(QLabel("Y:"))
         h_pos.addWidget(self._spin_atlas_y)
         form_item_props.addRow(self.tr("Posición px:"), h_pos)
+
+        h_size = QHBoxLayout()
+        self._spin_atlas_w = QSpinBox()
+        self._spin_atlas_w.setRange(4, 16384)
+        self._spin_atlas_w.valueChanged.connect(self._on_atlas_size_edited)
+
+        self._spin_atlas_h = QSpinBox()
+        self._spin_atlas_h.setRange(4, 16384)
+        self._spin_atlas_h.valueChanged.connect(self._on_atlas_size_edited)
+
+        self._btn_atlas_lock_ratio = QPushButton("🔓")
+        self._btn_atlas_lock_ratio.setCheckable(True)
+        self._btn_atlas_lock_ratio.setFixedWidth(30)
+        self._btn_atlas_lock_ratio.setToolTip(
+            self.tr("Bloquear proporción al transformar (o mantener Shift mientras arrastrás)")
+        )
+        self._btn_atlas_lock_ratio.toggled.connect(self._on_atlas_lock_ratio_toggled)
+
+        self._btn_atlas_reset_size = QPushButton(self.tr("↺ Original"))
+        self._btn_atlas_reset_size.setToolTip(
+            self.tr("Restablecer a las dimensiones originales sin escalar")
+        )
+        self._btn_atlas_reset_size.clicked.connect(self._on_atlas_reset_size)
+
+        h_size.addWidget(QLabel("W:"))
+        h_size.addWidget(self._spin_atlas_w)
+        h_size.addWidget(QLabel("H:"))
+        h_size.addWidget(self._spin_atlas_h)
+        h_size.addWidget(self._btn_atlas_lock_ratio)
+        h_size.addWidget(self._btn_atlas_reset_size)
+        form_item_props.addRow(self.tr("Tamaño px:"), h_size)
         v_items.addLayout(form_item_props)
 
         h_transform = QHBoxLayout()
@@ -214,8 +247,10 @@ class SpritePanel(QWidget):
 
         label_hint = QLabel(
             self.tr(
-                "Arrastrá con el ratón (Alt: sin imán) · Flechas: mover 1 px "
-                "(Shift: 10 px) · Supr: eliminar · Ctrl+Z: deshacer"
+                "Transformación libre: arrastrá vértices o bordes con el ratón · "
+                "Shift: conservar proporción · Alt: sin imán · "
+                "Flechas: mover 1 px (Shift: 10 px) · R: rotar · H/V: voltear · "
+                "Ctrl+D: duplicar · Supr: eliminar · Ctrl+Z: deshacer"
             )
         )
         label_hint.setWordWrap(True)
@@ -555,6 +590,10 @@ class SpritePanel(QWidget):
         self._edit_atlas_name.setEnabled(has_selected)
         self._spin_atlas_x.setEnabled(has_selected)
         self._spin_atlas_y.setEnabled(has_selected)
+        self._spin_atlas_w.setEnabled(has_selected)
+        self._spin_atlas_h.setEnabled(has_selected)
+        self._btn_atlas_lock_ratio.setEnabled(has_selected)
+        self._btn_atlas_reset_size.setEnabled(has_selected)
         for btn in (
             self._btn_atlas_duplicate,
             self._btn_atlas_rotate,
@@ -572,6 +611,13 @@ class SpritePanel(QWidget):
             self._spin_atlas_x.setValue(selected.x)
             self._spin_atlas_y.setValue(selected.y)
             self._updating_atlas_pos = False
+
+            self._updating_atlas_size = True
+            self._spin_atlas_w.setValue(selected.width)
+            self._spin_atlas_h.setValue(selected.height)
+            self._btn_atlas_lock_ratio.setChecked(atlas.lock_aspect_ratio)
+            self._btn_atlas_lock_ratio.setText("🔒" if atlas.lock_aspect_ratio else "🔓")
+            self._updating_atlas_size = False
         else:
             self._edit_atlas_name.clear()
 
@@ -623,6 +669,13 @@ class SpritePanel(QWidget):
             self._spin_atlas_x.setValue(new_x)
             self._spin_atlas_y.setValue(new_y)
             self._updating_atlas_pos = False
+
+    def _on_atlas_item_resized(self, item_id: str, new_w: int, new_h: int) -> None:
+        if not self._updating_atlas_size and self._tool.atlas_tool.selected_id == item_id:
+            self._updating_atlas_size = True
+            self._spin_atlas_w.setValue(new_w)
+            self._spin_atlas_h.setValue(new_h)
+            self._updating_atlas_size = False
 
     def _refresh_atlas_table(self) -> None:
         self._updating_atlas_table = True
@@ -730,6 +783,24 @@ class SpritePanel(QWidget):
             self._tool.atlas_tool.set_item_position(
                 selected.id, self._spin_atlas_x.value(), self._spin_atlas_y.value()
             )
+
+    def _on_atlas_size_edited(self) -> None:
+        if self._updating_atlas_size:
+            return
+        selected = self._tool.atlas_tool.selected_item
+        if selected is not None:
+            self._tool.atlas_tool.set_item_size(
+                selected.id, self._spin_atlas_w.value(), self._spin_atlas_h.value()
+            )
+
+    def _on_atlas_lock_ratio_toggled(self, checked: bool) -> None:
+        self._tool.atlas_tool.lock_aspect_ratio = checked
+        self._btn_atlas_lock_ratio.setText("🔒" if checked else "🔓")
+
+    def _on_atlas_reset_size(self) -> None:
+        selected = self._tool.atlas_tool.selected_item
+        if selected is not None:
+            self._tool.atlas_tool.reset_item_size(selected.id)
 
     def _on_atlas_dims_combo_changed(self, index: int) -> None:
         data = self._combo_atlas_dims.itemData(index)

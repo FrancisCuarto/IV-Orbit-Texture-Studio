@@ -19,6 +19,7 @@ Atajos de teclado (con el lienzo enfocado, en el Compositor de Atlas):
 from __future__ import annotations
 
 import logging
+import math
 import re
 import uuid
 from dataclasses import dataclass
@@ -50,6 +51,7 @@ SNAP_THRESHOLD_PX = 8.0
 
 MAX_ATLAS_DIM = 16384
 MIN_ATLAS_DIM = 32
+MIN_ITEM_DIM = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +62,7 @@ class _ItemState:
     x: int
     y: int
     pivot: Pivot
+    source_pixels: RgbaArray | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +70,8 @@ class AtlasSnapshot:
     """Instantánea inmutable del estado completo del atlas (para Deshacer/Rehacer).
 
     Los arreglos de píxeles se comparten por referencia: la herramienta nunca los modifica
-    in situ (rotar/voltear generan arreglos nuevos), por lo que las instantáneas son baratas.
+    in situ (rotar/voltear/escalar generan arreglos nuevos), por lo que las instantáneas son
+    baratas.
     """
 
     items: tuple[_ItemState, ...]
@@ -89,6 +93,8 @@ class AtlasSnapshot:
                 or a.y != b.y
                 or a.pivot != b.pivot
                 or a.pixels is not b.pixels
+                or a.pixels.shape != b.pixels.shape
+                or a.source_pixels is not b.source_pixels
             ):
                 return False
         return True
@@ -107,6 +113,7 @@ class AtlasTool(QObject):
     atlas_changed = Signal()
     item_selected = Signal(str)  # item_id o ""
     item_moved = Signal(str, int, int)  # item_id, nuevo x, nuevo y
+    item_resized = Signal(str, int, int)  # item_id, nuevo ancho, nuevo alto
     edit_committed = Signal(object, object, str, object)  # before, after, texto, merge_key
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -127,6 +134,17 @@ class AtlasTool(QObject):
         self._drag_start_item_pos: tuple[int, int] = (0, 0)
         self._drag_start_mouse_pos: tuple[float, float] = (0.0, 0.0)
         self._guides: list[tuple[str, int]] = []  # ("v", x) / ("h", y)
+
+        # Estado de redimensionamiento libre con manijas (esquinas y bordes)
+        self._is_resizing: bool = False
+        self._resize_moved: bool = False
+        self._active_handle: str | None = None
+        self._hover_handle: str | None = None
+        self._resize_before: AtlasSnapshot | None = None
+        self._resize_start_rect: tuple[int, int, int, int] = (0, 0, 0, 0)
+        self._resize_start_mouse: tuple[float, float] = (0.0, 0.0)
+        self._resize_start_ratio: float = 1.0
+        self._lock_aspect_ratio: bool = False
 
     # ------------------------------------------------------------- propiedades
     @property
@@ -161,6 +179,18 @@ class AtlasTool(QObject):
     @property
     def is_dragging(self) -> bool:
         return self._is_dragging
+
+    @property
+    def is_resizing(self) -> bool:
+        return self._is_resizing
+
+    @property
+    def lock_aspect_ratio(self) -> bool:
+        return self._lock_aspect_ratio
+
+    @lock_aspect_ratio.setter
+    def lock_aspect_ratio(self, val: bool) -> None:
+        self._lock_aspect_ratio = bool(val)
 
     def _find(self, item_id: str) -> AtlasItem | None:
         for item in self._items:
@@ -207,7 +237,16 @@ class AtlasTool(QObject):
     def snapshot(self) -> AtlasSnapshot:
         return AtlasSnapshot(
             items=tuple(
-                _ItemState(it.id, it.name, it.pixels, it.x, it.y, it.pivot) for it in self._items
+                _ItemState(
+                    it.id,
+                    it.name,
+                    it.pixels,
+                    it.x,
+                    it.y,
+                    it.pivot,
+                    it.source_pixels,
+                )
+                for it in self._items
             ),
             width=self._atlas_width,
             height=self._atlas_height,
@@ -218,9 +257,20 @@ class AtlasTool(QObject):
         """Restaura una instantánea (usado por Deshacer/Rehacer)."""
         assert isinstance(snap, AtlasSnapshot)
         self._is_dragging = False
+        self._is_resizing = False
+        self._active_handle = None
+        self._hover_handle = None
         self._guides = []
         self._items = [
-            AtlasItem(id=s.id, name=s.name, pixels=s.pixels, x=s.x, y=s.y, pivot=s.pivot)
+            AtlasItem(
+                id=s.id,
+                name=s.name,
+                pixels=s.pixels,
+                x=s.x,
+                y=s.y,
+                pivot=s.pivot,
+                source_pixels=s.source_pixels,
+            )
             for s in snap.items
         ]
         self._atlas_width = snap.width
@@ -398,30 +448,66 @@ class AtlasTool(QObject):
             x=src.x,
             y=src.y,
             pivot=src.pivot,
+            source_pixels=src.source_pixels,
         )
         self.add_item(dup, auto_place=True)
         return dup
+
+    def set_item_size(self, item_id: str, width: int, height: int) -> None:
+        """Cambia el tamaño de una textura remuestreando sus píxeles."""
+        item = self._find(item_id)
+        if item is None:
+            return
+        w = max(MIN_ITEM_DIM, min(width, MAX_ATLAS_DIM))
+        h = max(MIN_ITEM_DIM, min(height, MAX_ATLAS_DIM))
+        if item.width == w and item.height == h:
+            return
+        before = self.snapshot()
+        item.resize_pixels(w, h)
+        self.rebuild_composite()
+        self.item_resized.emit(item.id, w, h)
+        self.atlas_changed.emit()
+        self._commit(
+            before, f"Redimensionar '{item.name}' a {w}×{h}", merge_key=f"resize:{item.id}"
+        )
+
+    def reset_item_size(self, item_id: str) -> None:
+        """Restaura el tamaño original de la textura a partir de source_pixels."""
+        item = self._find(item_id)
+        if item is None:
+            return
+        before = self.snapshot()
+        orig_w, orig_h = item.reset_to_source_size()
+        self.rebuild_composite()
+        self.item_resized.emit(item.id, orig_w, orig_h)
+        self.atlas_changed.emit()
+        self._commit(before, f"Restablecer tamaño original de '{item.name}' ({orig_w}×{orig_h})")
 
     def _transform_selected(self, fn_name: str, text: str) -> bool:
         item = self.selected_item
         if item is None:
             return False
         before = self.snapshot()
-        px = item.pixels
-        if fn_name == "rot_cw":
-            new = np.rot90(px, k=-1)
-        elif fn_name == "rot_ccw":
-            new = np.rot90(px, k=1)
-        elif fn_name == "flip_h":
-            new = px[:, ::-1]
-        else:
-            new = px[::-1, :]
-        new = np.ascontiguousarray(new)
-        new.setflags(write=False)
-        # Rotar alrededor del centro para que no "salte" visualmente
+
+        def _apply(arr: RgbaArray) -> RgbaArray:
+            if fn_name == "rot_cw":
+                res = np.rot90(arr, k=-1)
+            elif fn_name == "rot_ccw":
+                res = np.rot90(arr, k=1)
+            elif fn_name == "flip_h":
+                res = arr[:, ::-1]
+            else:
+                res = arr[::-1, :]
+            res = np.ascontiguousarray(res)
+            res.setflags(write=False)
+            return res
+
+        new = _apply(item.pixels)
         cx = item.x + item.width / 2.0
         cy = item.y + item.height / 2.0
         item.pixels = new
+        if item.source_pixels is not None:
+            item.source_pixels = _apply(item.source_pixels)
         item.x = int(round(cx - item.width / 2.0))
         item.y = int(round(cy - item.height / 2.0))
         self.rebuild_composite()
@@ -488,14 +574,73 @@ class AtlasTool(QObject):
                 return item
         return None
 
+    def _get_handle_at(self, screen_pt: Point, mapper: CoordinateMapper) -> str | None:
+        """Determina si screen_pt cae sobre una manija de esquina, un borde o el cuerpo."""
+        selected = self.selected_item
+        if selected is None:
+            return None
+
+        sel_rect = self._screen_rect(mapper, selected.rect)
+
+        # 1. Manijas de las 4 esquinas (prioridad alta)
+        corner_tol = 10.0
+        corners = (
+            ("nw", sel_rect.left(), sel_rect.top()),
+            ("ne", sel_rect.right(), sel_rect.top()),
+            ("se", sel_rect.right(), sel_rect.bottom()),
+            ("sw", sel_rect.left(), sel_rect.bottom()),
+        )
+        for name, cx, cy in corners:
+            if math.hypot(screen_pt.x - cx, screen_pt.y - cy) <= corner_tol:
+                return name
+
+        # 2. Bordes (arriba, abajo, izquierda, derecha)
+        edge_tol = 7.0
+        x_in_range = (sel_rect.left() - 4.0) <= screen_pt.x <= (sel_rect.right() + 4.0)
+        y_in_range = (sel_rect.top() - 4.0) <= screen_pt.y <= (sel_rect.bottom() + 4.0)
+
+        if x_in_range:
+            if abs(screen_pt.y - sel_rect.top()) <= edge_tol:
+                return "n"
+            if abs(screen_pt.y - sel_rect.bottom()) <= edge_tol:
+                return "s"
+
+        if y_in_range:
+            if abs(screen_pt.x - sel_rect.left()) <= edge_tol:
+                return "w"
+            if abs(screen_pt.x - sel_rect.right()) <= edge_tol:
+                return "e"
+
+        # 3. Interior del elemento
+        if sel_rect.contains(QPointF(screen_pt.x, screen_pt.y)):
+            return "move"
+
+        return None
+
     def handle_mouse_press(self, event: QMouseEvent, mapper: CoordinateMapper) -> bool:
         if event.button() != Qt.MouseButton.LeftButton:
             return False
 
         pos = event.position()
-        img_pt = mapper.screen_to_image(Point(pos.x(), pos.y()))
-        hit = self._hit_test(img_pt.x, img_pt.y)
+        screen_pt = Point(pos.x(), pos.y())
+        img_pt = mapper.screen_to_image(screen_pt)
 
+        # 1. Si hay una textura seleccionada, verificar si se hizo clic en una manija o borde
+        handle = self._get_handle_at(screen_pt, mapper)
+        selected = self.selected_item
+        if selected is not None and handle in ("nw", "ne", "se", "sw", "n", "s", "w", "e"):
+            self._is_resizing = True
+            self._active_handle = handle
+            self._resize_moved = False
+            self._resize_before = self.snapshot()
+            self._resize_start_rect = (selected.x, selected.y, selected.width, selected.height)
+            self._resize_start_mouse = (img_pt.x, img_pt.y)
+            self._resize_start_ratio = selected.width / max(1.0, float(selected.height))
+            self.atlas_changed.emit()
+            return True
+
+        # 2. Hit test sobre las texturas
+        hit = self._hit_test(img_pt.x, img_pt.y)
         if hit is not None:
             self._selected_id = hit.id
             self._is_dragging = True
@@ -503,6 +648,7 @@ class AtlasTool(QObject):
             self._drag_before = self.snapshot()
             self._drag_start_item_pos = (hit.x, hit.y)
             self._drag_start_mouse_pos = (img_pt.x, img_pt.y)
+            self._hover_handle = "move"
             self.item_selected.emit(hit.id)
             self.atlas_changed.emit()
             return True
@@ -510,6 +656,7 @@ class AtlasTool(QObject):
         # Clic fuera de cualquier textura deselecciona
         if self._selected_id is not None:
             self._selected_id = None
+            self._hover_handle = None
             self.item_selected.emit("")
             self.atlas_changed.emit()
         return False
@@ -572,8 +719,87 @@ class AtlasTool(QObject):
 
     def handle_mouse_move(self, event: QMouseEvent, mapper: CoordinateMapper) -> bool:
         pos = event.position()
-        img_pt = mapper.screen_to_image(Point(pos.x(), pos.y()))
+        screen_pt = Point(pos.x(), pos.y())
+        img_pt = mapper.screen_to_image(screen_pt)
 
+        # Caso A: Redimensionando libremente con manijas
+        if self._is_resizing and (event.buttons() & Qt.MouseButton.LeftButton):
+            item = self.selected_item
+            if item is None or self._active_handle is None:
+                self._is_resizing = False
+                return False
+
+            dx = img_pt.x - self._resize_start_mouse[0]
+            dy = img_pt.y - self._resize_start_mouse[1]
+            shift_pressed = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            keep_aspect = shift_pressed or self._lock_aspect_ratio
+
+            sx, sy, sw, sh = self._resize_start_rect
+            ratio = self._resize_start_ratio
+            handle = self._active_handle
+
+            new_x, new_y = sx, sy
+            new_w, new_h = sw, sh
+
+            if handle == "e":
+                new_w = max(MIN_ITEM_DIM, int(round(sw + dx)))
+                if keep_aspect:
+                    new_h = max(MIN_ITEM_DIM, int(round(new_w / ratio)))
+            elif handle == "w":
+                new_w = max(MIN_ITEM_DIM, int(round(sw - dx)))
+                new_x = sx + (sw - new_w)
+                if keep_aspect:
+                    new_h = max(MIN_ITEM_DIM, int(round(new_w / ratio)))
+            elif handle == "s":
+                new_h = max(MIN_ITEM_DIM, int(round(sh + dy)))
+                if keep_aspect:
+                    new_w = max(MIN_ITEM_DIM, int(round(new_h * ratio)))
+            elif handle == "n":
+                new_h = max(MIN_ITEM_DIM, int(round(sh - dy)))
+                new_y = sy + (sh - new_h)
+                if keep_aspect:
+                    new_w = max(MIN_ITEM_DIM, int(round(new_h * ratio)))
+            elif handle == "se":
+                new_w = max(MIN_ITEM_DIM, int(round(sw + dx)))
+                if keep_aspect:
+                    new_h = max(MIN_ITEM_DIM, int(round(new_w / ratio)))
+                else:
+                    new_h = max(MIN_ITEM_DIM, int(round(sh + dy)))
+            elif handle == "sw":
+                new_w = max(MIN_ITEM_DIM, int(round(sw - dx)))
+                new_x = sx + (sw - new_w)
+                if keep_aspect:
+                    new_h = max(MIN_ITEM_DIM, int(round(new_w / ratio)))
+                else:
+                    new_h = max(MIN_ITEM_DIM, int(round(sh + dy)))
+            elif handle == "ne":
+                new_w = max(MIN_ITEM_DIM, int(round(sw + dx)))
+                if keep_aspect:
+                    new_h = max(MIN_ITEM_DIM, int(round(new_w / ratio)))
+                else:
+                    new_h = max(MIN_ITEM_DIM, int(round(sh - dy)))
+                new_y = sy + (sh - new_h)
+            elif handle == "nw":
+                new_w = max(MIN_ITEM_DIM, int(round(sw - dx)))
+                new_x = sx + (sw - new_w)
+                if keep_aspect:
+                    new_h = max(MIN_ITEM_DIM, int(round(new_w / ratio)))
+                else:
+                    new_h = max(MIN_ITEM_DIM, int(round(sh - dy)))
+                new_y = sy + (sh - new_h)
+
+            if new_w != item.width or new_h != item.height or new_x != item.x or new_y != item.y:
+                self._resize_moved = True
+                item.x = new_x
+                item.y = new_y
+                item.resize_pixels(new_w, new_h)
+                self.rebuild_composite()
+                self.item_resized.emit(item.id, new_w, new_h)
+                self.item_moved.emit(item.id, new_x, new_y)
+                self.atlas_changed.emit()
+            return True
+
+        # Caso B: Arrastrando para mover
         if self._is_dragging and (event.buttons() & Qt.MouseButton.LeftButton):
             item = self.selected_item
             if item is None:
@@ -604,10 +830,16 @@ class AtlasTool(QObject):
                 self.atlas_changed.emit()
             return True
 
-        # Actualizar hover
-        hit = self._hit_test(img_pt.x, img_pt.y)
-        new_hover = hit.id if hit is not None else None
-        if self._hovered_id != new_hover:
+        # Caso C: Solo movimiento del cursor (hover sobre manijas o elementos)
+        new_handle = self._get_handle_at(screen_pt, mapper)
+        if new_handle in ("nw", "ne", "se", "sw", "n", "s", "w", "e"):
+            new_hover = self._selected_id
+        else:
+            hit = self._hit_test(img_pt.x, img_pt.y)
+            new_hover = hit.id if hit is not None else None
+
+        if self._hover_handle != new_handle or self._hovered_id != new_hover:
+            self._hover_handle = new_handle
             self._hovered_id = new_hover
             self.atlas_changed.emit()
 
@@ -618,6 +850,17 @@ class AtlasTool(QObject):
         return self.handle_mouse_move(event, mapper)
 
     def handle_mouse_release(self, event: QMouseEvent, mapper: CoordinateMapper) -> bool:
+        if self._is_resizing:
+            self._is_resizing = False
+            self._active_handle = None
+            before = self._resize_before
+            self._resize_before = None
+            item = self.selected_item
+            if before is not None and self._resize_moved and item is not None:
+                self._commit(before, f"Redimensionar '{item.name}' a {item.width}×{item.height}")
+            self.atlas_changed.emit()
+            return True
+
         if self._is_dragging:
             self._is_dragging = False
             self._guides = []
@@ -677,9 +920,18 @@ class AtlasTool(QObject):
         return self.handle_key_press(event)
 
     def get_cursor(self) -> Qt.CursorShape | None:
+        handle = self._active_handle if self._is_resizing else self._hover_handle
+        if handle in ("nw", "se"):
+            return Qt.CursorShape.SizeFDiagCursor
+        if handle in ("ne", "sw"):
+            return Qt.CursorShape.SizeBDiagCursor
+        if handle in ("n", "s"):
+            return Qt.CursorShape.SizeVerCursor
+        if handle in ("w", "e"):
+            return Qt.CursorShape.SizeHorCursor
         if self._is_dragging:
             return Qt.CursorShape.ClosedHandCursor
-        if self._hovered_id is not None:
+        if handle == "move" or self._hovered_id is not None:
             return Qt.CursorShape.OpenHandCursor
         return None
 
@@ -691,7 +943,9 @@ class AtlasTool(QObject):
         return QRectF(tl.x, tl.y, br.x - tl.x, br.y - tl.y)
 
     def paint_overlay(self, painter: QPainter, mapper: CoordinateMapper) -> None:
-        """Dibuja bordes del atlas, contornos de selección, guías y etiquetas."""
+        """Dibuja bordes del atlas, contornos de selección, manijas de transformación,
+        guías y etiquetas.
+        """
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
@@ -730,7 +984,7 @@ class AtlasTool(QObject):
                     sy = mapper.image_to_screen(Point(0.0, float(value))).y
                     painter.drawLine(QPointF(0.0, sy), QPointF(float(vp.width()), sy))
 
-        # 5. Rectángulo de selección activa
+        # 5. Rectángulo de selección activa y manijas de transformación libre
         selected = self.selected_item
         if selected is not None:
             sel_rect = self._screen_rect(mapper, selected.rect)
@@ -738,26 +992,59 @@ class AtlasTool(QObject):
             painter.setBrush(QBrush(COLOR_SELECTION_FILL))
             painter.drawRect(sel_rect)
 
-            handle_half = 4.0
-            painter.setBrush(QBrush(COLOR_SELECTION))
-            for hx, hy in [
-                (sel_rect.left(), sel_rect.top()),
-                (sel_rect.right(), sel_rect.top()),
-                (sel_rect.left(), sel_rect.bottom()),
-                (sel_rect.right(), sel_rect.bottom()),
-            ]:
+            cur_handle = self._active_handle if self._is_resizing else self._hover_handle
+
+            # Puntos medios de los 4 bordes
+            midpoints = {
+                "n": ((sel_rect.left() + sel_rect.right()) / 2.0, sel_rect.top()),
+                "s": ((sel_rect.left() + sel_rect.right()) / 2.0, sel_rect.bottom()),
+                "w": (sel_rect.left(), (sel_rect.top() + sel_rect.bottom()) / 2.0),
+                "e": (sel_rect.right(), (sel_rect.top() + sel_rect.bottom()) / 2.0),
+            }
+
+            # Dibujar manijas de bordes
+            for name, (mx, my) in midpoints.items():
+                is_active = cur_handle == name
+                pw = 10.0 if name in ("n", "s") else 6.0
+                ph = 6.0 if name in ("n", "s") else 10.0
+                fill = COLOR_HOVER if is_active else COLOR_SELECTION
+                painter.setPen(QPen(QColor(15, 20, 28, 240), 1.5))
+                painter.setBrush(QBrush(fill))
+                painter.drawRoundedRect(QRectF(mx - pw / 2.0, my - ph / 2.0, pw, ph), 1.5, 1.5)
+
+            # Manijas de las 4 esquinas (cuadrados destacados)
+            corners = {
+                "nw": (sel_rect.left(), sel_rect.top()),
+                "ne": (sel_rect.right(), sel_rect.top()),
+                "se": (sel_rect.right(), sel_rect.bottom()),
+                "sw": (sel_rect.left(), sel_rect.bottom()),
+            }
+            corner_size = 8.0
+            corner_half = corner_size / 2.0
+
+            for name, (cx, cy) in corners.items():
+                is_active = cur_handle == name
+                fill = COLOR_HOVER if is_active else COLOR_SELECTION
+                painter.setPen(QPen(QColor(15, 20, 28, 240), 1.5))
+                painter.setBrush(QBrush(fill))
                 painter.drawRect(
-                    QRectF(hx - handle_half, hy - handle_half, handle_half * 2, handle_half * 2)
+                    QRectF(cx - corner_half, cy - corner_half, corner_size, corner_size)
                 )
 
-            # Badge con información (Nombre | WxH | X, Y)
+            # Badge con información (Nombre | WxH | X, Y | Pistas)
             font = QFont("Segoe UI", 9)
             font.setBold(True)
             painter.setFont(font)
-            info_text = (
-                f" {selected.name} | {selected.width}×{selected.height} px "
-                f"| X:{selected.x} Y:{selected.y} "
-            )
+            if self._is_resizing:
+                info_text = (
+                    f" ⤢ {selected.name} | {selected.width}×{selected.height} px "
+                    f"| X:{selected.x} Y:{selected.y} (Shift: conservar proporción) "
+                )
+            else:
+                info_text = (
+                    f" {selected.name} | {selected.width}×{selected.height} px "
+                    f"| X:{selected.x} Y:{selected.y} "
+                )
             metrics = painter.fontMetrics()
             txt_w = metrics.horizontalAdvance(info_text) + 8
             txt_h = metrics.height() + 4

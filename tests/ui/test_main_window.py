@@ -81,3 +81,32 @@ def test_main_window_open_invalid_image(qtbot, tmp_path, monkeypatch):
     assert success is False
     assert dialog_shown is True
     assert not window.canvas.has_image
+
+
+def test_help_dialog_and_demo_loader(qtbot):
+    from iv_orbit_texture_studio.ui.help_dialog import HelpDialog
+
+    dialog = HelpDialog(initial_page="welcome")
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    # Verificar navegación a las distintas secciones
+    dialog.show_page("tutorial_atlas")
+    assert "🎓 Tutorial: Atlas y Escala" in dialog._nav_list.currentItem().text()
+    assert "Transformación Libre" in dialog._browser.toHtml()
+
+    dialog.show_page("shortcuts")
+    assert "Atajos de Teclado" in dialog._nav_list.currentItem().text()
+
+    # Probar carga interactiva de texturas de muestra en MainWindow
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+
+    assert len(window.atlas_tool.items) == 0
+    window.load_demo_atlas()
+    assert len(window.atlas_tool.items) == 4
+    assert window._current_mode == "sprites"
+    assert window.sprite_tool.submode == "atlas"
+    assert window.sprite_panel._tabs.currentIndex() == 0
+

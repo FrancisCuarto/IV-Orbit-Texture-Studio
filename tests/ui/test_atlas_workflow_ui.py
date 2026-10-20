@@ -379,3 +379,116 @@ def test_atlas_unique_names_fit_canvas_and_direct_file_import(qtbot, tmp_path):
     window.atlas_tool.fit_canvas_to_content(power_of_two=True)
     assert window.atlas_tool.atlas_width == 256
     assert window.atlas_tool.atlas_height in (64, 128)
+
+
+def test_atlas_free_transformation_and_resizing(qtbot, tmp_path):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+
+    # Importar textura de 100x100 al Atlas
+    f = tmp_path / "tile.png"
+    _create_mock_qimage(100, 100, QColor(60, 180, 120, 255)).save(str(f))
+    window.sprite_panel.add_image_files_to_atlas([f])
+    window.set_mode("sprites")
+
+    atlas = window.atlas_tool
+    assert len(atlas.items) == 1
+    item = atlas.items[0]
+    atlas.select_item(item.id)
+    assert atlas.selected_id == item.id
+    assert (item.width, item.height) == (100, 100)
+
+    mapper = CoordinateMapper()
+    # 1. Redimensionar libremente arrastrando el vértice inferior derecho (SE)
+    # Coordenadas de pantalla del vértice SE
+    se_screen = QPointF(float(item.x + item.width), float(item.y + item.height))
+    press_ev = QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        se_screen,
+        se_screen,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    assert window.sprite_tool.handle_mouse_press(press_ev, mapper) is True
+    assert atlas.is_resizing is True
+
+    # Mover el ratón para expandir ancho a 160 y alto a 120
+    new_se = QPointF(float(item.x + 160), float(item.y + 120))
+    move_ev = QMouseEvent(
+        QMouseEvent.Type.MouseMove,
+        new_se,
+        new_se,
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    assert window.sprite_tool.handle_mouse_move(move_ev, mapper) is True
+    assert (item.width, item.height) == (160, 120)
+    assert window.sprite_panel._spin_atlas_w.value() == 160
+    assert window.sprite_panel._spin_atlas_h.value() == 120
+
+    rel_ev = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        new_se,
+        new_se,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    assert window.sprite_tool.handle_mouse_release(rel_ev, mapper) is True
+    assert atlas.is_resizing is False
+    assert (item.width, item.height) == (160, 120)
+
+    # 2. Deshacer (Ctrl+Z) restaura tamaño original 100x100
+    window.action_undo.trigger()
+    assert (atlas.items[0].width, atlas.items[0].height) == (100, 100)
+
+    # 3. Rehacer (Ctrl+Y) vuelve a 160x120
+    window.action_redo.trigger()
+    assert (atlas.items[0].width, atlas.items[0].height) == (160, 120)
+
+    # 4. Redimensionar solo el borde derecho (E)
+    cur_item = atlas.items[0]
+    e_x = float(cur_item.x + cur_item.width)
+    e_y = float(cur_item.y + cur_item.height / 2.0)
+    e_screen = QPointF(e_x, e_y)
+    press_e = QMouseEvent(
+        QMouseEvent.Type.MouseButtonPress,
+        e_screen,
+        e_screen,
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    assert window.sprite_tool.handle_mouse_press(press_e, mapper) is True
+    # Arrastrar 30 px a la derecha
+    move_e = QMouseEvent(
+        QMouseEvent.Type.MouseMove,
+        QPointF(e_screen.x() + 30, e_screen.y()),
+        QPointF(e_screen.x() + 30, e_screen.y()),
+        Qt.MouseButton.NoButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    assert window.sprite_tool.handle_mouse_move(move_e, mapper) is True
+    assert atlas.items[0].width == 190
+    assert atlas.items[0].height == 120  # Alto no cambió
+
+    rel_e = QMouseEvent(
+        QMouseEvent.Type.MouseButtonRelease,
+        QPointF(e_screen.x() + 30, e_screen.y()),
+        QPointF(e_screen.x() + 30, e_screen.y()),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    assert window.sprite_tool.handle_mouse_release(rel_e, mapper) is True
+
+    # 5. Restablecer tamaño original con el botón '↺ Original'
+    window.sprite_panel._btn_atlas_reset_size.click()
+    assert (atlas.items[0].width, atlas.items[0].height) == (100, 100)
+    assert window.sprite_panel._spin_atlas_w.value() == 100
+    assert window.sprite_panel._spin_atlas_h.value() == 100
+

@@ -65,6 +65,7 @@ from iv_orbit_texture_studio.tools.texture_prep import TexturePrepPanel, Texture
 from iv_orbit_texture_studio.tools.texture_ripper.preview import TextureRipperPanel
 from iv_orbit_texture_studio.tools.texture_ripper.tool import TextureRipperTool
 from iv_orbit_texture_studio.ui.canvas.image_canvas import ImageCanvas
+from iv_orbit_texture_studio.ui.help_dialog import HelpDialog, create_demo_texture_items
 from iv_orbit_texture_studio.ui.qt_image import qimage_to_rgba_array, rgba_array_to_qimage
 
 logger = logging.getLogger(__name__)
@@ -285,6 +286,26 @@ class MainWindow(QMainWindow):
         self.action_center.setShortcut(QKeySequence("Ctrl+Shift+C"))
         self.action_center.triggered.connect(self.canvas.center_image)
 
+        # Ayuda y Documentación
+        self.action_help_docs = QAction(self.tr("📖 &Guía de Uso y Documentación…"), self)
+        self.action_help_docs.setShortcut(QKeySequence("F1"))
+        self.action_help_docs.triggered.connect(lambda: self.show_help("welcome"))
+
+        self.action_help_tutorials = QAction(self.tr("🎓 &Tutoriales Paso a Paso…"), self)
+        self.action_help_tutorials.triggered.connect(lambda: self.show_help("tutorial_atlas"))
+
+        self.action_help_shortcuts = QAction(self.tr("⌨️ &Atajos de Teclado…"), self)
+        self.action_help_shortcuts.setShortcut(QKeySequence("Ctrl+/"))
+        self.action_help_shortcuts.triggered.connect(lambda: self.show_help("shortcuts"))
+
+        self.action_help_demo = QAction(
+            self.tr("▶ &Cargar Muestra de Demostración en el Atlas"), self
+        )
+        self.action_help_demo.triggered.connect(self.load_demo_atlas)
+
+        self.action_about = QAction(self.tr("ℹ️ &Acerca de IV Orbit Texture Studio…"), self)
+        self.action_about.triggered.connect(lambda: self.show_help("about"))
+
         self._view_actions = (
             self.action_zoom_in,
             self.action_zoom_out,
@@ -343,6 +364,15 @@ class MainWindow(QMainWindow):
         menu_window.addAction(self.dock_prep.toggleViewAction())
         menu_window.addAction(self.dock_pbr.toggleViewAction())
 
+        menu_help = self.menuBar().addMenu(self.tr("&Ayuda"))
+        menu_help.addAction(self.action_help_docs)
+        menu_help.addAction(self.action_help_tutorials)
+        menu_help.addAction(self.action_help_shortcuts)
+        menu_help.addSeparator()
+        menu_help.addAction(self.action_help_demo)
+        menu_help.addSeparator()
+        menu_help.addAction(self.action_about)
+
     def _create_toolbar(self) -> None:
         toolbar = self.addToolBar(self.tr("Principal"))
         toolbar.setObjectName("main_toolbar")
@@ -369,6 +399,8 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         for action in self._view_actions:
             toolbar.addAction(action)
+        toolbar.addSeparator()
+        toolbar.addAction(self.action_help_docs)
 
     def set_mode(self, mode: str) -> None:
         """Cambia el modo activo entre Texture Ripper, Sprites, Preparación y Mapas PBR."""
@@ -1148,3 +1180,24 @@ class MainWindow(QMainWindow):
 
     def _on_cursor_left(self) -> None:
         self._label_cursor.setText("—")
+
+    def show_help(self, page_key: str = "welcome") -> None:
+        """Abre la ventana de documentación y tutoriales en la sección indicada."""
+        dialog = HelpDialog(self, initial_page=page_key)
+        dialog.demo_requested.connect(self.load_demo_atlas)
+        dialog.exec()
+
+    def load_demo_atlas(self) -> None:
+        """Carga un conjunto de 4 texturas de muestra en el Atlas para practicar."""
+        demo_items = create_demo_texture_items()
+        for item in demo_items:
+            self.atlas_tool.add_item(item, auto_place=False)
+        self.set_mode("sprites")
+        self.sprite_panel.set_active_tab(0)
+        self.statusBar().showMessage(
+            self.tr(
+                "✓ Se cargaron 4 texturas de muestra en el Atlas. "
+                "Probá arrastrar sus vértices y bordes para cambiar su tamaño libremente."
+            ),
+            8000,
+        )
